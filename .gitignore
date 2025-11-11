@@ -1,0 +1,23 @@
+# Build artifacts
+Debug/
+Release/
+build/
+*.o
+*.d
+*.elf
+*.map
+*.hex
+*.bin
+*.list
+*.lst
+*.log
+*.bak
+*.su
+
+# IDE metadata & temp
+.settings/
+.metadata/
+*.launch
+
+# STM32CubeMX/IDE caches
+*.ioc-backup
