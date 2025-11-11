@@ -28,7 +28,6 @@
   #warning "FPU is not initialized, but the project is compiling for an FPU. Please initialize the FPU before use."
 #endif
 
-// tiny integer print to avoid printf
 static void print_int(int v)
 {
     char buf[16]; int i=15; buf[i]='\0';
@@ -43,14 +42,13 @@ int main(void)
     clock_init();                    // 72 MHz if USE_HSE=1
     systick_init(SYSCLK_FREQ_HZ);
 
-    // APB1 is 36 MHz (from our RCC setup)
     usart2_init(36000000UL, 115200);
     tc_init();
 
     usart2_write_str("\r\nAD8495 Thermocouple demo (no HAL)\r\n");
 
     while (1) {
-        int32_t t = tc_read_c_x10();   // 0.1 °C
+        int32_t t = tc_read_c_x10();
         usart2_write_str("T = ");
         print_int(t/10);
         usart2_write_char('.');

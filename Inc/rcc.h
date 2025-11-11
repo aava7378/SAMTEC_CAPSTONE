@@ -10,6 +10,7 @@
 
 #pragma once
 #include "stm32f1xx.h"
-void clock_init(void);   // picks HSE@72 or HSI@64 based on USE_HSE
+
+void clock_init(void);
 
 #endif /* INC_RCC_H_ */

@@ -10,6 +10,7 @@
 
 #pragma once
 #include "stm32f1xx.h"
+
 void usart2_init(uint32_t pclk1_hz, uint32_t baud);
 void usart2_write_char(char c);
 void usart2_write_str(const char *s);

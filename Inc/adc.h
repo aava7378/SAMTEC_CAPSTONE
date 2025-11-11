@@ -10,7 +10,7 @@
 
 #pragma once
 #include "stm32f1xx.h"
-void     adc1_init_single(uint8_t channel);  // e.g., 1 for PA1
-uint16_t adc1_read_single(uint8_t channel);  // blocking single conversion
+void     adc1_init_single(uint8_t channel);
+uint16_t adc1_read_single(uint8_t channel);
 
 #endif /* ADC_H_ */
