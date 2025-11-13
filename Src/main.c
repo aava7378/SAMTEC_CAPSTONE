@@ -16,13 +16,20 @@
  ******************************************************************************
  */
 
-#include <stdint.h>
+#define MAIN 3
 
+#if (MAIN == 0)
+
+#include <stdint.h>
 #include "board.h"
 #include "rcc.h"
 #include "delay.h"
 #include "usart.h"
 #include "thermocouple.h"
+
+#include "pwm.h"
+#include "motor.h"
+#include "pid.h"
 
 #if !defined(__SOFT_FP__) && defined(__ARM_FP)
   #warning "FPU is not initialized, but the project is compiling for an FPU. Please initialize the FPU before use."
@@ -37,26 +44,348 @@ static void print_int(int v)
     usart2_write_str(&buf[i]);
 }
 
+static void print_float_1dp(float x)
+{
+    int32_t xi = (int32_t)x;
+    int32_t xf = (int32_t)((x - (float)xi) * (x >= 0 ? 10.0f : -10.0f));
+    if (x < 0 && xi == 0) usart2_write_char('-');
+    print_int(xi);
+    usart2_write_char('.');
+    if (xf < 0) xf = -xf;
+    print_int(xf);
+}
+
 int main(void)
 {
-    clock_init();                    // 72 MHz if USE_HSE=1
+    // 72 MHz SYSCLK (USE_HSE=1 in board.h)
+    clock_init();
     systick_init(SYSCLK_FREQ_HZ);
 
+    // USART2 @ 115200
     usart2_init(36000000UL, 115200);
+
+    // Thermocouple (AD8495 on PA1 / ADC1_IN1)
     tc_init();
 
-    usart2_write_str("\r\nAD8495 Thermocouple demo (no HAL)\r\n");
+    // L298N direction GPIO and TIM1 PWM on PA8 (D9)
+    motor_io_init();
+    pwm_tim1_ch1_init(SYSCLK_FREQ_HZ, 20000U);
+
+    pid_t pid;
+    // starting gains
+    pid_init(&pid,
+             0.05f,   // Kp
+             0.15f,   // Ki
+             0.00f,   // Kd
+             0.02f,   // dt = 20 ms loop
+             -1.0f, 1.0f);
+
+    // target temperature (°C)
+    static float setC = 75.0f;
+
+    usart2_write_str("Setpoint = ");
+    print_float_1dp(setC);
+    usart2_write_str(" C\r\n");
 
     while (1) {
-        int32_t t = tc_read_c_x10();
-        usart2_write_str("T = ");
-        print_int(t/10);
-        usart2_write_char('.');
-        int32_t frac = t<0 ? -t : t;
-        print_int(frac % 10);
-        usart2_write_str(" C\r\n");
-        delay_ms(500);
+        // 20 ms control period
+        uint32_t now = SysTick->VAL;
+        (void)now;
+
+        // read temperature
+        int32_t t_x10 = tc_read_c_x10();
+        float   measC = (float)t_x10 * 0.1f;
+
+        // PID step
+        float u = pid_step(&pid, setC, measC);
+
+        // direction + duty from u
+        int   dir   = (u >  0.001f) ? +1 : (u < -0.001f) ? -1 : 0; // change polarity
+        float duty  = (u >= 0.0f) ? u : -u;  // 0..1
+
+        motor_set_dir(dir);
+        pwm_tim1_set(duty);
+
+        // print
+        usart2_write_str("T=");
+        print_float_1dp(measC);
+        usart2_write_str(" C  ");
+        // usart2_write_str(" C  duty=");
+        // print_float_1dp(duty * 100.0f);
+        // usart2_write_str("%  dir=");
+
+//        if (dir > 0)
+//        {
+//        	usart2_write_str("HEAT");
+//        }
+//        else if (dir < 0)
+//        {
+//        	usart2_write_str("COOL");
+//        }
+//        else
+//        {
+//        	usart2_write_str("COAST");
+//        }
+
+        usart2_write_str("\r\n");
+
+        // if temperature moves the wrong way, swap polarity:
+        // 1) in motor_set_dir(): swap which input is asserted for HEAT/COOL, or
+        // 2) Multiply 'u' by -1.0 (invert).
+
+        delay_ms(20);
     }
-    /* Loop forever */
-	// for(;;);
 }
+
+#endif
+
+
+
+
+
+
+#if (MAIN == 1)
+
+#include <stdint.h>
+#include "board.h"
+#include "rcc.h"
+#include "delay.h"
+#include "usart.h"
+#include "thermocouple.h"
+
+#include "pwm.h"
+#include "motor.h"
+#include "pid.h"
+
+// safety limits for L298N
+#define MAX_DUTY_L298N     0.25f   // 25% max duty while using L298N (keeps current down)
+#define DUTY_SLEW_PER_STEP 0.02f   // duty may change by at most 2% per loop
+
+#if !defined(__SOFT_FP__) && defined(__ARM_FP)
+  #warning "FPU is not initialized, but the project is compiling for an FPU. Please initialize the FPU before use."
+#endif
+
+static void print_int(int v)
+{
+    char buf[16]; int i=15; buf[i]='\0';
+    int neg = (v<0); if (neg) v = -v;
+    do { buf[--i] = (char)('0' + (v%10)); v/=10; } while (v);
+    if (neg) buf[--i]='-';
+    usart2_write_str(&buf[i]);
+}
+
+static void print_float_1dp(float x)
+{
+    int32_t xi = (int32_t)x;
+    int32_t xf = (int32_t)((x - (float)xi) * (x >= 0 ? 10.0f : -10.0f));
+    if (x < 0 && xi == 0) usart2_write_char('-');
+    print_int(xi);
+    usart2_write_char('.');
+    if (xf < 0) xf = -xf;
+    print_int(xf);
+}
+
+static inline float clampf_local(float x, float lo, float hi)
+{
+    if (x < lo)
+    {
+    	return lo;
+    }
+    if (x > hi)
+    {
+    	return hi;
+    }
+
+    return x;
+}
+
+int main(void)
+{
+    // 72 MHz SYSCLK (USE_HSE=1 in board.h)
+    clock_init();
+    systick_init(SYSCLK_FREQ_HZ);
+
+    // USART2 @ 115200
+    usart2_init(36000000UL, 115200);
+
+    // Thermocouple (AD8495 on PA1 / ADC1_IN1)
+    tc_init();
+
+    // L298N direction GPIO and TIM1 PWM on PA8 (D9)
+    motor_io_init();
+    pwm_tim1_ch1_init(SYSCLK_FREQ_HZ, 20000U); // 20 kHz PWM
+
+    pid_t pid;
+    pid_init(&pid,
+             0.05f,   // Kp
+             0.15f,   // Ki
+             0.00f,   // Kd
+             0.02f,   // dt = 20 ms loop
+             -1.0f, 1.0f);
+
+    // Setpoint
+    static float setC = 75.0f;
+
+    usart2_write_str("Setpoint = ");
+    print_float_1dp(setC);
+    usart2_write_str(" C\r\n");
+
+    float duty_prev = 0.0f;
+
+    while (1) {
+        // Read temperature
+        int32_t t_x10 = tc_read_c_x10();
+        float   measC = (float)t_x10 * 0.1f;
+
+        float u = pid_step(&pid, setC, measC);
+
+        // Direction + raw duty from u
+        int   dir   = (u >  0.001f) ? +1 : (u < -0.001f) ? -1 : 0;
+        float duty  = (u >= 0.0f) ? u : -u;  // 0..1
+
+        // cap duty for L298N
+        if (duty > MAX_DUTY_L298N) duty = MAX_DUTY_L298N;
+
+        // slew-rate limit
+        // duty must not jump more than DUTY_SLEW_PER_STEP per 20 ms
+        float d_err = duty - duty_prev;
+        if (d_err >  DUTY_SLEW_PER_STEP) duty = duty_prev + DUTY_SLEW_PER_STEP;
+        if (d_err < -DUTY_SLEW_PER_STEP) duty = duty_prev - DUTY_SLEW_PER_STEP;
+        duty = clampf_local(duty, 0.0f, MAX_DUTY_L298N);
+        duty_prev = duty;
+
+        // Apply to bridge
+        motor_set_dir(dir);
+        pwm_tim1_set(duty);
+
+        // Telemetry
+        usart2_write_str("T=");
+        print_float_1dp(measC);
+        usart2_write_str(" C  duty_cap=");
+        print_float_1dp(duty * 100.0f);
+        usart2_write_str("%  dir=");
+        if (dir > 0)      usart2_write_str("HEAT");
+        else if (dir< 0)  usart2_write_str("COOL");
+        else              usart2_write_str("COAST");
+        usart2_write_str("\r\n");
+
+        delay_ms(20);
+    }
+}
+
+#endif
+
+#if (MAIN == 3)
+
+#include <stdint.h>
+#include "board.h"
+#include "rcc.h"
+#include "delay.h"
+#include "usart.h"
+#include "thermocouple.h"
+
+#include "pwm.h"
+// #include "motor.h"
+// #include "pid.h"
+
+static void print_int(int v)
+{
+    char buf[16]; int i = 15; buf[i] = '\0';
+    int neg = (v < 0); if (neg) v = -v;
+    do { buf[--i] = (char)('0' + (v % 10)); v /= 10; } while (v);
+    if (neg) buf[--i] = '-';
+    usart2_write_str(&buf[i]);
+}
+
+static void print_float_1dp(float x)
+{
+    int32_t xi = (int32_t)x;
+    int32_t xf = (int32_t)((x - (float)xi) * (x >= 0 ? 10.0f : -10.0f));
+    if (x < 0 && xi == 0) usart2_write_char('-');
+    print_int(xi);
+    usart2_write_char('.');
+    if (xf < 0) xf = -xf;
+    print_int(xf);
+}
+
+int main(void)
+{
+    // System clock to 72 MHz
+    clock_init();
+    systick_init(SYSCLK_FREQ_HZ);
+
+    // USART2 @115200
+    usart2_init(36000000UL, 115200);
+
+    // Thermocouple
+    tc_init();
+
+    // 1 kHz PWM on PA8 (D9) via TIM1 CH1; 25% duty
+    pwm_tim1_ch1_init(SYSCLK_FREQ_HZ, 2000U);
+    const float duty = 0.90f;      // 10%
+    pwm_tim1_set(duty);
+
+    usart2_write_str("\r\nPWM 1kHz @25% on PA8 (3.3V logic). Reading thermocouple...\r\n");
+
+    while (1)
+    {
+//        // Read thermocouple (°C × 10), convert to float °C
+//        int32_t t_x10 = tc_read_c_x10();
+//        float   tC    = (float)t_x10 * 0.1f;
+//
+//        // Telemetry
+//        usart2_write_str("T = ");
+//        print_float_1dp(tC);
+//        usart2_write_str(" C | duty cycle = ");
+//        print_float_1dp(duty * 100.0f);
+//        usart2_write_str("%\r\n");
+//
+//        delay_ms(500);
+
+        // 20 ms control period
+        uint32_t now = SysTick->VAL;
+        (void)now;
+
+        // read temperature
+        int32_t t_x10 = tc_read_c_x10();
+        float   measC = (float)t_x10 * 0.1f;
+
+        // PID step
+        // float u = pid_step(&pid, setC, measC);
+
+        // direction + duty from u
+        // int   dir   = (u >  0.001f) ? +1 : (u < -0.001f) ? -1 : 0; // change polarity
+        // float duty  = (u >= 0.0f) ? u : -u;  // 0..1
+
+        // motor_set_dir(dir);
+        pwm_tim1_set(duty);
+
+        // print
+        usart2_write_str("T=");
+        print_float_1dp(measC);
+        usart2_write_str(" C  ");
+        // usart2_write_str(" C  duty=");
+        // print_float_1dp(duty * 100.0f);
+        // usart2_write_str("%  dir=");
+
+//        if (dir > 0)
+//        {
+//        	usart2_write_str("HEAT");
+//        }
+//        else if (dir < 0)
+//        {
+//        	usart2_write_str("COOL");
+//        }
+//        else
+//        {
+//        	usart2_write_str("COAST");
+//        }
+
+        usart2_write_str("\r\n");
+
+        delay_ms(20);
+    }
+}
+
+
+#endif

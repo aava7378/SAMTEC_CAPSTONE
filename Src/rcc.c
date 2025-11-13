@@ -7,7 +7,6 @@ static void clock_init_hse_72mhz(void)
     RCC->CR |= RCC_CR_HSEON;
     while (!(RCC->CR & RCC_CR_HSERDY)) {}
 
-    // Flash: 2 WS + prefetch
     FLASH->ACR = FLASH_ACR_PRFTBE | FLASH_ACR_LATENCY_2;
 
     // AHB=1, APB2=1, APB1=2, PLL = HSE * 9 = 72 MHz
@@ -19,44 +18,31 @@ static void clock_init_hse_72mhz(void)
                 | RCC_CFGR_PPRE2_DIV1
                 | RCC_CFGR_PLLMULL9;
 
-    // PLL source = HSE (set PLLSRC bit)
     RCC->CFGR |= RCC_CFGR_PLLSRC;
-
-    // PLL on
     RCC->CR |= RCC_CR_PLLON;
+
     while (!(RCC->CR & RCC_CR_PLLRDY)) {}
 
-    // SYSCLK = PLL
     RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_SW) | RCC_CFGR_SW_PLL;
+
     while (((RCC->CFGR >> 2) & 0x3) != 0x2) {}
 }
 
 static void clock_init_hsi_64mhz(void)
 {
-    // HSI on (already on after reset)
     RCC->CR |= RCC_CR_HSION;
     while (!(RCC->CR & RCC_CR_HSIRDY)) {}
 
-    // Flash: 2 WS + prefetch
     FLASH->ACR = FLASH_ACR_PRFTBE | FLASH_ACR_LATENCY_2;
+    RCC->CFGR &= ~(RCC_CFGR_HPRE | RCC_CFGR_PPRE1 | RCC_CFGR_PPRE2 | RCC_CFGR_PLLSRC | RCC_CFGR_PLLXTPRE | RCC_CFGR_PLLMULL);
 
-    // AHB=1, APB2=1, APB1=2, PLL = (HSI/2) * 16 = 64 MHz
-    RCC->CFGR &= ~(RCC_CFGR_HPRE | RCC_CFGR_PPRE1 | RCC_CFGR_PPRE2 |
-                   RCC_CFGR_PLLSRC | RCC_CFGR_PLLXTPRE | RCC_CFGR_PLLMULL);
+    RCC->CFGR |=  RCC_CFGR_HPRE_DIV1 | RCC_CFGR_PPRE1_DIV2 | RCC_CFGR_PPRE2_DIV1 | RCC_CFGR_PLLMULL16;
 
-    RCC->CFGR |=  RCC_CFGR_HPRE_DIV1
-                | RCC_CFGR_PPRE1_DIV2
-                | RCC_CFGR_PPRE2_DIV1
-                | RCC_CFGR_PLLMULL16;
-
-    // PLL source = HSI/2 (clear PLLSRC bit)
     RCC->CFGR &= ~RCC_CFGR_PLLSRC;
 
-    // PLL on
     RCC->CR |= RCC_CR_PLLON;
     while (!(RCC->CR & RCC_CR_PLLRDY)) {}
 
-    // SYSCLK = PLL
     RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_SW) | RCC_CFGR_SW_PLL;
     while (((RCC->CFGR >> 2) & 0x3) != 0x2) {}
 }
