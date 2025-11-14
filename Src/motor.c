@@ -89,19 +89,19 @@ void motor_set_dir(int dir)
 {
     if (dir < 0)
     {
-        // HEAT: IN1=1, IN2=0  (flip later if your polarity is opposite)
+        // heat
         IN1_PORT->BSRR = (1U << IN1_PIN);
         IN2_PORT->BRR  = (1U << IN2_PIN);
     }
     else if (dir > 0)
     {
-        // COOL: IN1=0, IN2=1
+    	// cool
         IN1_PORT->BRR  = (1U << IN1_PIN);
         IN2_PORT->BSRR = (1U << IN2_PIN);
     }
     else
     {
-        // COAST: both low (no drive)
+    	// standby
         IN1_PORT->BRR  = (1U << IN1_PIN);
         IN2_PORT->BRR  = (1U << IN2_PIN);
     }

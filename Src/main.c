@@ -16,7 +16,7 @@
  ******************************************************************************
  */
 
-#define MAIN 3
+#define MAIN 4
 
 #if (MAIN == 0)
 
@@ -387,5 +387,115 @@ int main(void)
     }
 }
 
+#endif
+
+
+#if (MAIN == 4)
+
+#include <stdint.h>
+
+#include "board.h"
+#include "rcc.h"
+#include "delay.h"
+#include "usart.h"
+
+#include "i2c.h"
+#include "mlx90614.h"
+
+static void uart_send_char(char c)
+{
+    usart2_write_char(c);
+}
+
+static void uart_send_str(const char *s)
+{
+    usart2_write_str(s);
+}
+
+static void uart_send_int(int32_t x)
+{
+    char buf[16];
+    int idx = 0;
+
+    if (x < 0) {
+        uart_send_char('-');
+        x = -x;
+    }
+
+    do {
+        buf[idx++] = (char)('0' + (x % 10));
+        x /= 10;
+    } while (x > 0);
+
+    while (idx--)
+        uart_send_char(buf[idx]);
+}
+
+static void uart_send_temp_2dec(const char *label, int32_t mdeg)
+{
+    int32_t sign    = (mdeg < 0) ? -1 : 1;
+    int32_t abs_val = (mdeg < 0) ? -mdeg : mdeg;
+
+    int32_t whole = abs_val / 1000;
+    int32_t centi = (abs_val % 1000) / 10;
+
+    uart_send_str(label);
+    uart_send_str(": ");
+
+    if (sign < 0)
+        uart_send_char('-');
+
+    uart_send_int(whole);
+    uart_send_char('.');
+    if (centi < 10)
+        uart_send_char('0');
+    uart_send_int(centi);
+
+    uart_send_str(" C\r\n");
+}
+
+int main(void)
+{
+    clock_init();
+    systick_init(SYSCLK_FREQ_HZ);
+    usart2_init(36000000U, 115200U);
+
+    uart_send_str("\r\nMLX90614 IR TEMP TEST START\r\n");
+    i2c1_init(36000000U, 100000U);
+
+    uint32_t sample = 0;
+
+    while (1)
+    {
+        int32_t obj, amb;
+        int rc_obj, rc_amb;
+
+        uart_send_str("\r\n--- Sample #");
+        uart_send_int(sample++);
+        uart_send_str(" ---\r\n");
+
+        rc_obj = mlx90614_read_object(&obj);
+        rc_amb = mlx90614_read_ambient(&amb);
+
+        if (rc_obj == 0)
+            uart_send_temp_2dec("IR Object Temp", obj);
+        else {
+            uart_send_str("IR Object Temp read error rc=");
+            uart_send_int(rc_obj);
+            uart_send_str("\r\n");
+        }
+
+        if (rc_amb == 0)
+            uart_send_temp_2dec("IR Ambient Temp", amb);
+        else {
+            uart_send_str("IR Ambient Temp read error rc=");
+            uart_send_int(rc_amb);
+            uart_send_str("\r\n");
+        }
+
+        // 500 ms between samples
+        delay_ms(500);
+    }
+}
 
 #endif
