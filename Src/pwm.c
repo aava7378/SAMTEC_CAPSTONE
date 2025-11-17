@@ -10,10 +10,10 @@
 static uint16_t s_arr = 3599; // with PSC=0, ARR=3599 gives 20 kHz at 72 MHz
 
 /**
- * @brief  Initialize TIM1 Channel 1 (PA8 / D9) for hardware PWM output.
+ * @brief  Initialize TIM1 Channel 1 for hardware PWM output.
  *
  * This function configures Timer 1, Channel 1 to generate a hardware-based
- * PWM signal on pin PA8 (D9). The PWM frequency and duty-cycle resolution
+ * PWM signal on d7. The PWM frequency and duty-cycle resolution
  * are set according to the system clock and desired output frequency.
  *
  * The resulting PWM output drive a Peltier module,
@@ -64,7 +64,7 @@ void pwm_tim1_ch1_init(uint32_t sysclk_hz, uint32_t pwm_hz)
 }
 
 /**
- * @brief  Set the PWM duty cycle for TIM1 Channel 1 (PA8 / D9).
+ * @brief  Set the PWM duty cycle for TIM1 Channel 1.
  *
  * This function updates the PWM output level by writing a new compare
  * value (CCR1) to Timer 1, Channel 1, which controls how long the

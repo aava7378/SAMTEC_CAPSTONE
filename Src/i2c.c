@@ -49,41 +49,49 @@ int i2c1_read_word(uint8_t addr7, uint8_t cmd, uint16_t *value)
 {
     if (!value) return -1;
 
+    // Wait until bus is free
     if (wait_flag_clear(&I2C1->SR2, I2C_SR2_BUSY) < 0) {
         return -1;
     }
 
+    /* -------- Write phase: send command byte -------- */
     I2C1->CR1 |= I2C_CR1_START;
     if (wait_flag_set(&I2C1->SR1, I2C_SR1_SB) < 0) return -1;
 
+    // Send address (write)
     I2C1->DR = (uint32_t)(addr7 << 1);
     if (wait_flag_set(&I2C1->SR1, I2C_SR1_ADDR) < 0) return -1;
     (void)I2C1->SR1;
     (void)I2C1->SR2;
 
-    I2C1->DR = cmd;
+    // Send command (register)
     if (wait_flag_set(&I2C1->SR1, I2C_SR1_TXE) < 0) return -1;
+    I2C1->DR = cmd;
     if (wait_flag_set(&I2C1->SR1, I2C_SR1_BTF) < 0) return -1;
 
+    /* -------- Read phase: read 2 bytes (LSB, MSB) -------- */
     I2C1->CR1 |= I2C_CR1_START;
     if (wait_flag_set(&I2C1->SR1, I2C_SR1_SB) < 0) return -1;
 
-    I2C1->CR1 |= I2C_CR1_ACK;
+    // Send address (read)
     I2C1->DR = (uint32_t)((addr7 << 1) | 1U);
     if (wait_flag_set(&I2C1->SR1, I2C_SR1_ADDR) < 0) return -1;
 
-    I2C1->CR1 &= ~I2C_CR1_ACK;
+    // 2-byte receive sequence
+    I2C1->CR1 &= ~I2C_CR1_ACK;   // we want to NACK after the 2nd byte
     (void)I2C1->SR1;
     (void)I2C1->SR2;
 
-    if (wait_flag_set(&I2C1->SR1, I2C_SR1_RXNE) < 0) return -1;
-    uint8_t low = (uint8_t)I2C1->DR;
+    // Wait until both bytes are received (BTF = 1)
+    if (wait_flag_set(&I2C1->SR1, I2C_SR1_BTF) < 0) return -1;
 
+    // Generate STOP then read both bytes
     I2C1->CR1 |= I2C_CR1_STOP;
 
-    if (wait_flag_set(&I2C1->SR1, I2C_SR1_RXNE) < 0) return -1;
-    uint8_t high = (uint8_t)I2C1->DR;
+    uint8_t low  = (uint8_t)I2C1->DR; // LSB
+    uint8_t high = (uint8_t)I2C1->DR; // MSB
 
     *value = (uint16_t)low | ((uint16_t)high << 8);
     return 0;
 }
+
