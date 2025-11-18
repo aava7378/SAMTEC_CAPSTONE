@@ -567,7 +567,6 @@ int main(void)
 #include "mlx90614.h"
 #include "pid.h"
 
-// ----------------- UART helpers -----------------
 static void print_int(int v)
 {
     char buf[16];
@@ -599,22 +598,19 @@ static void print_float_1dp(float x)
     if (xf < 0) xf = -xf;
     print_int(xf);
 }
-// ------------------------------------------------
 
-// Human-readable mode strings
 static const char* mode_to_str(int mode)
 {
     switch (mode) {
         case 0: return "HEATING_UP";
-        case 1: return "HOLDING_IN_RANGE";
-        case 2: return "STOPPED_OVER_TEMP";
+        case 1: return "IN_RANGE";
+        case 2: return "STOPPED_OVER_TEMP_COOLING DOWN";
         default: return "UNKNOWN";
     }
 }
 
 int main(void)
 {
-    // ---- Basic init ----
     clock_init();                          // 72 MHz system clock
     systick_init(SYSCLK_FREQ_HZ);
 
@@ -630,15 +626,14 @@ int main(void)
     // I2C + MLX90614
     i2c1_init(36000000U, 100000U);  // PCLK1 = 36 MHz, I2C at 100 kHz
 
-    // PWM on TIM1 CH1 (PA8 = Arduino D7) for Peltier driver
     pwm_tim1_ch1_init(SYSCLK_FREQ_HZ, 2000U);   // 2 kHz PWM
 
-    // ---- PID setup ----
+    // PID setup
     pid_t pid;
     const float dt_s    = 0.02f;   // 20 ms loop
     const float setC    = 100.0f;  // target temperature in °C
     const float out_min = 0.0f;    // heat only, 0% duty
-    const float out_max = 0.80f;   // 80% duty
+    const float out_max = 0.70f;   // 70% duty
 
     // Initial gains
     const float Kp = 0.0886757f;
@@ -647,19 +642,18 @@ int main(void)
 
     pid_init(&pid, Kp, Ki, Kd, dt_s, out_min, out_max);
 
-    // Band around setpoint: 96..104 C
-    const float BAND_LO = 96.0f;
-    const float BAND_HI = 104.0f;
+    const float BAND_LO = 97.0f;
+    const float BAND_HI = 103.0f;
 
     float duty = 0.0f;
 
     while (1)
     {
-        // ---- Read thermocouple ----
-        int32_t t_x10 = tc_read_c_x10();   // °C * 10
+        // Read thermocouple
+        int32_t t_x10 = tc_read_c_x10();
         float   measC = (float)t_x10 * 0.1f;
 
-        // ---- Read IR sensor ----
+        // Read IR sensor
         int32_t ir_obj_mdeg = 0;
         int rc_obj = mlx90614_read_object(&ir_obj_mdeg);
         float ir_objC = 0.0f;
@@ -669,12 +663,12 @@ int main(void)
             ir_objC = (float)ir_obj_mdeg / 1000.0f;
         }
 
-        // ---- PID + safety logic ----
-        int mode = 0; // text comes from mode_to_str()
+        // PID + safety logic
+        int mode = 0;
 
         if (measC > BAND_HI)
         {
-            // Above 104 C → safety stop
+            // Above 103 C → safety stop
             duty = 0.0f;
             mode = 2;
 
@@ -689,16 +683,16 @@ int main(void)
             if (measC < BAND_LO)
                 mode = 0;  // HEATING_UP
             else
-                mode = 1;  // HOLDING_IN_RANGE
+                mode = 1;  // HOLDIIN_RANGE
         }
 
         // Apply PWM to peltier
         pwm_tim1_set(duty);
 
         // ---- Telemetry ----
-        usart2_write_str("TC=");
+        usart2_write_str("TC = ");
         print_float_1dp(measC);
-        usart2_write_str("C");
+        // usart2_write_str("C");
 
 //        if (rc_obj == 0)
 //            print_float_1dp(ir_objC);
@@ -707,9 +701,9 @@ int main(void)
 //            print_int(rc_obj);
 //        }
 
-        usart2_write_str("C, duty=");
+        usart2_write_str(" C | duty = ");
         print_float_1dp(duty * 100.0f);
-        usart2_write_str("%, state=");
+        usart2_write_str("% | state = ");
         usart2_write_str(mode_to_str(mode));
         usart2_write_str("\r\n");
 
