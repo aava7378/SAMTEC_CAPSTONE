@@ -21,8 +21,9 @@
 // 3: Drive current, duty cycle, and frequency
 // 4: IR sesnor code
 // 5: New updated pid code to start heating peltier module and stop at a setpoint
+// 8: volatge reading added
 
-#define MAIN 6
+#define MAIN 8
 
 #if (MAIN == 0)
 
@@ -631,19 +632,22 @@ int main(void)
     // PID setup
     pid_t pid;
     const float dt_s    = 0.02f;   // 20 ms loop
-    const float setC    = 100.0f;  // target temperature in °C
+    const float setC    = 110.0f;  // target temperature in °C
     const float out_min = 0.0f;    // heat only, 0% duty
     const float out_max = 0.70f;   // 70% duty
 
     // Initial gains
-    const float Kp = 0.0886757f;
-    const float Ki = 0.0530638f;
+//    const float Kp = 0.0886757f;
+//    const float Ki = 0.0530638f;
+
+    const float Kp = 0.0203464726870566f;
+    const float Ki = 0.0203600773423131f;
     const float Kd = 0.0f;
 
     pid_init(&pid, Kp, Ki, Kd, dt_s, out_min, out_max);
 
-    const float BAND_LO = 97.0f;
-    const float BAND_HI = 103.0f;
+    const float BAND_LO = 107.0f;
+    const float BAND_HI = 113.0f;
 
     float duty = 0.0f;
 
@@ -692,14 +696,14 @@ int main(void)
         // ---- Telemetry ----
         usart2_write_str("TC = ");
         print_float_1dp(measC);
-        // usart2_write_str("C");
+        usart2_write_str(" C | IR = ");
 
-//        if (rc_obj == 0)
-//            print_float_1dp(ir_objC);
-//        else {
-//            usart2_write_str("ERR=");
-//            print_int(rc_obj);
-//        }
+        if (rc_obj == 0)
+            print_float_1dp(ir_objC);
+        else {
+            usart2_write_str("ERR=");
+            print_int(rc_obj);
+        }
 
         usart2_write_str(" C | duty = ");
         print_float_1dp(duty * 100.0f);
@@ -708,6 +712,385 @@ int main(void)
         usart2_write_str("\r\n");
 
         // PID loop period
+        delay_ms(20);
+
+        // delay_ms(15000);
+    }
+}
+
+
+#endif
+
+#if (MAIN == 7)
+#include <stdint.h>
+#include "board.h"
+#include "rcc.h"
+#include "delay.h"
+#include "usart.h"
+
+#include "thermocouple.h"
+#include "pwm.h"
+#include "i2c.h"
+#include "mlx90614.h"
+#include "pid.h"
+
+static void print_int(int v)
+{
+    char buf[16];
+    int i = 15;
+    buf[i] = '\0';
+    int neg = (v < 0);
+    if (neg) v = -v;
+
+    do {
+        buf[--i] = (char)('0' + (v % 10));
+        v /= 10;
+    } while (v);
+
+    if (neg) buf[--i] = '-';
+    usart2_write_str(&buf[i]);
+}
+
+static void print_float_1dp(float x)
+{
+    int32_t xi = (int32_t)x;
+    int32_t xf = (int32_t)((x - (float)xi) * (x >= 0 ? 10.0f : -10.0f));
+
+    if (x < 0 && xi == 0)
+        usart2_write_char('-');
+
+    print_int(xi);
+    usart2_write_char('.');
+
+    if (xf < 0) xf = -xf;
+    print_int(xf);
+}
+
+static const char* mode_to_str(int mode)
+{
+    switch (mode) {
+        case 0: return "HEATING_UP";
+        case 1: return "IN_RANGE";
+        case 2: return "STOPPED_OVER_TEMP_COOLING DOWN";
+        default: return "UNKNOWN";
+    }
+}
+
+int main(void)
+{
+    clock_init();                          // 72 MHz system clock
+    systick_init(SYSCLK_FREQ_HZ);
+
+    usart2_init(36000000UL, 115200);
+    usart2_write_str("\r\nStart PID Test: IR (object) control, heat-only\r\n");
+
+    // Small startup delay (gives sensors time to power up)
+    delay_ms(200);
+
+    // Thermocouple (ADC) - Still read for monitoring
+    tc_init();
+
+    // I2C + MLX90614
+    i2c1_init(36000000U, 100000U);  // PCLK1 = 36 MHz, I2C at 100 kHz
+
+    pwm_tim1_ch1_init(SYSCLK_FREQ_HZ, 2000U);   // 2 kHz PWM
+
+    // PID setup
+    pid_t pid;
+    const float dt_s    = 0.02f;   // 20 ms loop
+    const float setC    = 100.0f;  // target temperature in °C
+    const float out_min = 0.0f;    // heat only, 0% duty
+    const float out_max = 0.70f;   // 70% duty
+
+    // Initial gains
+//    const float Kp = 0.0886757f;
+//    const float Ki = 0.0530638f;
+
+    const float Kp = 0.0203464726870566f;
+    const float Ki = 0.0203600773423131f;
+    const float Kd = 0.0f;
+
+    pid_init(&pid, Kp, Ki, Kd, dt_s, out_min, out_max);
+
+    // Bounds for IR object temp control
+    const float BAND_LO = 97.0f;
+    const float BAND_HI = 103.0f;
+
+    float duty = 0.0f;
+    float current_control_temp = 0.0f; // Stores the temp used for control (IR temp if valid)
+
+    while (1)
+    {
+        // Read thermocouple (for monitoring/debugging)
+        int32_t t_x10 = tc_read_c_x10();
+        float   measC = (float)t_x10 * 0.1f;
+
+        // Read IR sensor
+        int32_t ir_obj_mdeg = 0;
+        int rc_obj = mlx90614_read_object(&ir_obj_mdeg);
+        float ir_objC = 0.0f;
+        int ir_valid = 0;
+
+        if (rc_obj == 0)
+        {
+            ir_objC = (float)ir_obj_mdeg / 1000.0f;
+            ir_valid = 1;
+        }
+
+        // --- PID + safety logic (Uses IR temp) ---
+        int mode = 0;
+
+        if (ir_valid)
+        {
+            current_control_temp = ir_objC;
+
+            if (current_control_temp > BAND_HI)
+            {
+                // Above BAND_HI C → safety stop
+                duty = 0.0f;
+                mode = 2;
+
+                pid.integrator  = 0.0f;
+                pid.initialized = 0;
+            }
+            else
+            {
+                // Pass IR object temp to PID
+                float u = pid_step(&pid, setC, current_control_temp);
+                duty = u;
+
+                if (current_control_temp < BAND_LO)
+                    mode = 0;  // HEATING_UP
+                else
+                    mode = 1;  // IN_RANGE
+            }
+        }
+        else
+        {
+            // IR reading failed, stop heating as a safety measure and reset PID
+            duty = 0.0f;
+            mode = 3; // UNKNOWN mode in this case - could be ERROR
+            pid.integrator  = 0.0f;
+            pid.initialized = 0;
+        }
+
+
+        // Apply PWM to peltier
+        pwm_tim1_set(duty);
+
+        // ---- Telemetry ----
+        usart2_write_str("TC = ");
+        print_float_1dp(measC);
+        usart2_write_str(" C | IR = ");
+
+        if (rc_obj == 0)
+            print_float_1dp(ir_objC);
+        else {
+            usart2_write_str("ERR=");
+            print_int(rc_obj);
+        }
+
+        usart2_write_str(" C | ControlTemp = ");
+        print_float_1dp(current_control_temp);
+        usart2_write_str(" C | duty = ");
+        print_float_1dp(duty * 100.0f);
+        usart2_write_str("% | state = ");
+        usart2_write_str(mode_to_str(mode));
+        usart2_write_str("\r\n");
+
+        // PID loop period
+        delay_ms(20);
+
+        // delay_ms(15000);
+    }
+}
+#endif
+
+#if (MAIN == 8)
+#include <stdint.h>
+#include "board.h"
+#include "rcc.h"
+#include "delay.h"
+#include "usart.h"
+
+#include "thermocouple.h"
+#include "pwm.h"
+#include "i2c.h"
+#include "mlx90614.h"
+#include "pid.h"
+#include "adc.h"   // adc1_init_single / adc1_read_single / adc2_*
+
+
+// ------------ ADC / voltage sensing config ------------
+#define PELTIER_ADC_CH   4U      // PA4 / ADC2_IN4 (change if your sense pin is different)
+#define VREF_mV          3300U   // MCU analog reference in mV
+// ------------------------------------------------------
+
+
+// ----------------- UART helpers -----------------
+static void print_int(int v)
+{
+    char buf[16];
+    int i = 15;
+    buf[i] = '\0';
+    int neg = (v < 0);
+    if (neg) v = -v;
+
+    do {
+        buf[--i] = (char)('0' + (v % 10));
+        v /= 10;
+    } while (v);
+
+    if (neg) buf[--i] = '-';
+    usart2_write_str(&buf[i]);
+}
+
+static void print_float_1dp(float x)
+{
+    int32_t xi = (int32_t)x;
+    int32_t xf = (int32_t)((x - (float)xi) * (x >= 0 ? 10.0f : -10.0f));
+
+    if (x < 0 && xi == 0)
+        usart2_write_char('-');
+
+    print_int(xi);
+    usart2_write_char('.');
+
+    if (xf < 0) xf = -xf;
+    print_int(xf);
+}
+
+static const char* mode_to_str(int mode)
+{
+    switch (mode) {
+        case 0: return "HEATING_UP";
+        case 1: return "IN_RANGE";
+        case 2: return "STOPPED_OVER_TEMP_COOLING DOWN";
+        default: return "UNKNOWN";
+    }
+}
+// ------------------------------------------------
+
+
+int main(void)
+{
+    // ---- Basic init ----
+    clock_init();                          // 72 MHz system clock
+    systick_init(SYSCLK_FREQ_HZ);
+
+    usart2_init(36000000UL, 115200);
+    usart2_write_str("\r\nStart PID Test: TC + IR(object), heat-only with Vsense\r\n");
+
+    // Small startup delay (gives sensors time to power up)
+    delay_ms(200);
+
+    // Thermocouple (ADC1 on PA1) – this calls adc1_init_single(1) inside tc_init()
+    tc_init();
+
+    // ADC2 on PA4 (ADC2_IN4) to sense Peltier/driver output voltage
+    // NOTE: make sure your sense hardware actually goes to PA4 / channel 4,
+    // or change PELTIER_ADC_CH above to match your pin.
+    adc2_init_single(PELTIER_ADC_CH);
+
+    // I2C + MLX90614
+    i2c1_init(36000000U, 100000U);  // PCLK1 = 36 MHz, I2C at 100 kHz
+
+    // PWM on TIM1 CH1 (PA8 = Arduino D7) for Peltier driver
+    pwm_tim1_ch1_init(SYSCLK_FREQ_HZ, 2000U);   // 2 kHz PWM
+
+    // ---- PID setup ----
+    pid_t pid;
+    const float dt_s    = 0.02f;   // 20 ms loop
+    const float setC    = 110.0f;  // target temperature in °C
+    const float out_min = 0.0f;    // heat only, 0% duty
+    const float out_max = 0.70f;   // 70% duty max (gentler heating)
+
+    // Your latest gains
+    const float Kp = 0.0203464726870566f;
+    const float Ki = 0.0203600773423131f;
+    const float Kd = 0.0f;
+
+    pid_init(&pid, Kp, Ki, Kd, dt_s, out_min, out_max);
+
+    // Band around setpoint: 107..113 C
+    const float BAND_LO = 107.0f;
+    const float BAND_HI = 113.0f;
+
+    float duty = 0.0f;
+
+    while (1)
+    {
+        // ---- Read thermocouple (control sensor) ----
+        int32_t t_x10 = tc_read_c_x10();      // °C * 10
+        float   measC = (float)t_x10 * 0.1f;  // °C
+
+        // ---- Read IR sensor (object) ----
+        int32_t ir_obj_mdeg = 0;
+        int rc_obj = mlx90614_read_object(&ir_obj_mdeg);
+        float ir_objC = 0.0f;
+
+        if (rc_obj == 0)
+        {
+            ir_objC = (float)ir_obj_mdeg / 1000.0f;  // m°C → °C
+        }
+
+        // ---- Read Peltier drive sense voltage via ADC2 (continuous mode) ----
+        uint16_t raw_v = adc2_read_single(PELTIER_ADC_CH);
+        float v_adc = (float)raw_v * (float)VREF_mV / 4095.0f / 1000.0f; // volts at MCU pin
+
+        // If you have a resistor divider from the actual Peltier node to PA4, e.g.:
+        //   Vreal = v_adc * (Rtop + Rbottom) / Rbottom;
+        // you can compute that here as a second value if you want.
+
+        // ---- PID + safety logic ----
+        int mode = 0;
+
+        if (measC > BAND_HI)
+        {
+            // Above upper band → safety stop
+            duty = 0.0f;
+            mode = 2;
+
+            // Reset integrator to avoid windup
+            pid.integrator  = 0.0f;
+            pid.initialized = 0;
+        }
+        else
+        {
+            // Normal PID control in heat-only mode, clamped [0, 0.70]
+            float u = pid_step(&pid, setC, measC);
+            duty = u;
+
+            if (measC < BAND_LO)
+                mode = 0;  // HEATING_UP (below 107 C)
+            else
+                mode = 1;  // IN_RANGE (107–113 C)
+        }
+
+        // ---- Apply PWM to Peltier ----
+        pwm_tim1_set(duty);
+
+        // ---- Telemetry ----
+        usart2_write_str("TC = ");
+        print_float_1dp(measC);
+        usart2_write_str(" C | IR = ");
+
+        if (rc_obj == 0)
+            print_float_1dp(ir_objC);
+        else {
+            usart2_write_str("ERR=");
+            print_int(rc_obj);
+        }
+
+        usart2_write_str(" C | duty = ");
+        print_float_1dp(duty * 100.0f);
+        usart2_write_str("% | Vsense = ");
+        print_float_1dp(v_adc);
+        usart2_write_str(" V | state = ");
+        usart2_write_str(mode_to_str(mode));
+        usart2_write_str("\r\n");
+
+        // PID loop period (must match dt_s)
         delay_ms(20);
     }
 }
