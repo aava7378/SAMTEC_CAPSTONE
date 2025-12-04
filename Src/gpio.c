@@ -11,8 +11,8 @@ void gpio_init_output(GPIO_TypeDef *port, uint8_t pin)
     uint32_t shift = (pin & 7U) * 4U;
     uint32_t v = *cr;
 
-    v &= ~(0xFU << shift);     // clear
-    v |=  (0x2U << shift);     // mode=10 (2 MHz), cnf=00 (GP push-pull)
+    v &= ~(0xFU << shift);
+    v |=  (0x2U << shift);
 
     *cr = v;
 }
