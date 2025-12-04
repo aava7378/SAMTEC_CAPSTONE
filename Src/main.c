@@ -1082,11 +1082,11 @@ int main(void)
             print_int(rc_obj);
         }
 
-        usart2_write_str(" C | duty = ");
+        usart2_write_str(" C | duty = %");
         print_float_1dp(duty * 100.0f);
-        usart2_write_str("% | Vsense = ");
-        print_float_1dp(v_adc);
-        usart2_write_str(" V | state = ");
+        // usart2_write_str("% | Vsense = ");
+        // print_float_1dp(v_adc);
+        usart2_write_str(" | state = ");
         usart2_write_str(mode_to_str(mode));
         usart2_write_str("\r\n");
 
