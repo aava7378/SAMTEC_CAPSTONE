@@ -24,4 +24,14 @@ void i2c1_init(uint32_t pclk1_hz, uint32_t i2c_speed_hz);
  */
 int i2c1_read_word(uint8_t addr7, uint8_t cmd, uint16_t *value);
 
+
+/**
+ * Writes an arbitrary byte buffer:
+ *  START → SA+W → data[0..len-1] → STOP
+ *
+ * @return 0 on success, negative on timeout/error
+ */
+int i2c1_write_bytes(uint8_t addr7, const uint8_t *data, uint16_t len);
+
+
 #endif /* I2C_H_ */
