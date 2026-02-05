@@ -95,3 +95,38 @@ int i2c1_read_word(uint8_t addr7, uint8_t cmd, uint16_t *value)
     return 0;
 }
 
+int i2c1_write_bytes(uint8_t addr7, const uint8_t *data, uint16_t len)
+{
+    if (!data || len == 0U) return -1;
+
+    // Wait until bus is free
+    if (wait_flag_clear(&I2C1->SR2, I2C_SR2_BUSY) < 0) {
+        return -1;
+    }
+
+    // START
+    I2C1->CR1 |= I2C_CR1_START;
+    if (wait_flag_set(&I2C1->SR1, I2C_SR1_SB) < 0) return -1;
+
+    // Address + Write
+    I2C1->DR = (uint32_t)(addr7 << 1);
+    if (wait_flag_set(&I2C1->SR1, I2C_SR1_ADDR) < 0) return -1;
+    (void)I2C1->SR1;
+    (void)I2C1->SR2;
+
+    // Send bytes
+    for (uint16_t i = 0; i < len; i++)
+    {
+        if (wait_flag_set(&I2C1->SR1, I2C_SR1_TXE) < 0) return -1;
+        I2C1->DR = data[i];
+    }
+
+    // Wait for last byte complete
+    if (wait_flag_set(&I2C1->SR1, I2C_SR1_BTF) < 0) return -1;
+
+    // STOP
+    I2C1->CR1 |= I2C_CR1_STOP;
+    return 0;
+}
+
+
