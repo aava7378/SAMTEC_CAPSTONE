@@ -1250,9 +1250,9 @@ int main(void)
 #define ADC1_CH_TC2            1U      // PA1 / ADC1_IN1
 
 // ADC2: Everything else
-#define ADC2_CH_OPT_TIA        2U      // PA2 / ADC2_IN2   (TIA output => Vtia)
-#define ADC2_CH_VSENSE         3U      // PA3 / ADC2_IN3   (Vsense)
-#define ADC2_CH_ISENSE         4U      // PA4 / ADC2_IN4   (Isense voltage output)
+#define ADC2_CH_OPT_TIA        4U      // PA4 / ADC2_IN4
+#define ADC2_CH_VSENSE         5U      // PA5 / ADC2_IN5
+#define ADC2_CH_ISENSE         6U      // PA6 / ADC2_IN6
 
 // ===================== ADC / Photodiode conversion constants =====================
 #define VREF_mV                3300U
@@ -1531,7 +1531,7 @@ int main(void)
     systick_init(SYSCLK_FREQ_HZ);
 
     usart2_init(36000000UL, 115200);
-    usart2_write_str("\r\nStart PID Test + Menu: 2x Thermocouples (ADC1) + Optical/Vsense/Isense (ADC2)\r\n");
+    usart2_write_str("\r\nStart PI Test + Menu: 2x Thermocouples (ADC1) + Optical/Vsense/Isense (ADC2)\r\n");
 
     delay_ms(200);
 
@@ -1590,7 +1590,6 @@ int main(void)
 
     while (1)
     {
-        // -------- Menu key handling (always active) --------
         char key;
         if (ui_poll_menu_key_nonblocking(&key)) {
             if (key == '1') {
@@ -1767,31 +1766,31 @@ int main(void)
         print_float_1dp(duty * 100.0f);
         usart2_write_str("%");
 
-        usart2_write_str(" | Vsense=");
-        print_float_1dp(Vsense);
-        usart2_write_str("V");
+//        usart2_write_str(" | Vsense=");
+//        print_float_1dp(Vsense);
+//        usart2_write_str("V");
 
-        usart2_write_str(" | Vtia=");
-        print_float_1dp(Vtia);
-        usart2_write_str("V");
+//        usart2_write_str(" | Vtia=");
+//        print_float_1dp(Vtia);
+//        usart2_write_str("V");
 
-        usart2_write_str(" | Ipd=");
-        print_u32(Ipd_uA);
-        usart2_write_str("uA");
+//        usart2_write_str(" | Ipd=");
+//        print_u32(Ipd_uA);
+//        usart2_write_str("uA");
 
-        usart2_write_str(" | Popt=");
-        print_u32(Popt_uW);
-        usart2_write_str("uW");
+//        usart2_write_str(" | Popt=");
+//        print_u32(Popt_uW);
+//        usart2_write_str("uW");
 
-        usart2_write_str(" | Visense=");
-        print_float_1dp(Visense);
-        usart2_write_str("V");
+//        usart2_write_str(" | Visense=");
+//        print_float_1dp(Visense);
+//        usart2_write_str("V");
 
         usart2_write_str(" | state=");
         usart2_write_str(heat_state_to_str(heat_state));
 
-        usart2_write_str(" | ui=");
-        usart2_write_str(ui_mode_to_str(ui));
+//        usart2_write_str(" | ui=");
+//        usart2_write_str(ui_mode_to_str(ui));
 
         usart2_write_str(" | ramp=");
         print_float_1dp(ramp_elapsed_s);
@@ -1799,7 +1798,7 @@ int main(void)
         print_float_1dp(ramp_time_s);
         usart2_write_str("s\r\n");
 
-        delay_ms(20);
+        delay_ms(200);
     }
 }
 
