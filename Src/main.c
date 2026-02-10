@@ -26,8 +26,160 @@
 #define PI_LOOP 7
 #define BANG_LOOP 12
 #define MENU_OPTION 1
+#define PI 45
+#define MENU_N_8 20
 
-#define MAIN MENU_OPTION
+#define MAIN MENU_N_8
+
+
+#if (MAIN == UART_TEST)
+#include "stm32f1xx.h"
+
+#include "stm32f1xx.h"
+static void delay(volatile uint32_t n) { while (n--) __NOP(); }
+
+int main(void)
+{
+    RCC->APB2ENR |= RCC_APB2ENR_IOPAEN;
+
+    // PA2 output push-pull, 2 MHz
+    GPIOA->CRL &= ~(0xFU << (2U * 4U));
+    GPIOA->CRL |=  (0x2U << (2U * 4U));
+
+    while (1) {
+        GPIOA->ODR ^= (1U << 2);
+        delay(800000);
+    }
+}
+
+
+#endif
+
+
+#if (MAIN == PI)
+
+#include <stdint.h>
+#include <string.h>
+#include <ctype.h>
+#include <stdlib.h>
+
+#include "rcc.h"
+#include "delay.h"
+#include "usart.h"
+
+// If your project doesn't define this elsewhere:
+#ifndef SYSCLK_FREQ_HZ
+#define SYSCLK_FREQ_HZ 72000000UL
+#endif
+
+// -------- helpers --------
+static void uart_puts(const char *s) { usart2_write_str(s); }
+
+static int uart_try_getc(char *out)
+{
+#if defined(USART2)
+    if (USART2->SR & (1U << 5)) {               // RXNE
+        *out = (char)(USART2->DR & 0xFF);       // reading DR clears RXNE
+        return 1;
+    }
+#endif
+    return 0;
+}
+
+// Read a line with echo, polled:
+// - call repeatedly, returns 1 when a full line is ready
+static int uart_readline_poll(char *buf, uint32_t buf_sz)
+{
+    static uint32_t len = 0;
+    char c;
+    if (!uart_try_getc(&c)) return 0;
+
+    // echo typed character back
+    usart2_write_char(c);
+
+    if (c == '\r' || c == '\n') {
+        uart_puts("\r\n");
+        buf[len] = '\0';
+        len = 0;
+        return 1;
+    }
+
+    // backspace support
+    if (c == '\b' || c == 127) {
+        if (len > 0) {
+            len--;
+            uart_puts("\b \b");
+        }
+        return 0;
+    }
+
+    // ignore other control chars
+    if ((unsigned char)c < 32) return 0;
+
+    if (len < (buf_sz - 1)) {
+        buf[len++] = c;
+    }
+    return 0;
+}
+
+static void to_upper_inplace(char *s)
+{
+    for (; *s; ++s) *s = (char)toupper((unsigned char)*s);
+}
+
+// -------- main --------
+int main(void)
+{
+    clock_init();
+    systick_init(SYSCLK_FREQ_HZ);
+
+    // IMPORTANT: this PCLK value must match your usart2_init() implementation.
+    // On STM32F103 with SYSCLK=72MHz and APB1 prescaler /2, PCLK1 = 36MHz (common).
+    usart2_init(8000000UL, 115200);
+
+    uart_puts("\r\n[UART2 PI TEST - BARE METAL]\r\n");
+    uart_puts("Type: PING or HELP\r\n");
+
+    char line[96];
+
+    uint32_t alive_ms = 0;
+
+    while (1)
+    {
+//        // Periodic TX spam so you cannot "miss" boot prints
+//        // (Assumes delay_ms works from systick)
+//        if (alive_ms >= 1000) {
+//            alive_ms = 0;
+//            uart_puts("STM32_ALIVE\r\n");
+//        }
+//
+//        // Handle incoming line
+//        if (uart_readline_poll(line, sizeof(line))) {
+//            // Normalize whitespace: just parse first token
+//            char *cmd = strtok(line, " ");
+//            if (!cmd) continue;
+//
+//            to_upper_inplace(cmd);
+//
+//            if (strcmp(cmd, "PING") == 0) {
+//                uart_puts("PONG\r\n");
+//            } else if (strcmp(cmd, "HELP") == 0) {
+//                uart_puts("Commands: PING, HELP\r\n");
+//            } else {
+//                uart_puts("ERR\r\n");
+//            }
+//        }
+//
+//        delay_ms(10);
+//        alive_ms += 10;
+
+    	usart2_write_str("STM32_ALIVE\r\n");
+    	    delay_ms(1000);
+    }
+}
+
+#endif
+
 
 #if (MAIN == MENU_OPTION)
 
@@ -614,172 +766,6 @@ int main(void)
 
 #endif
 
-#if (MAIN == 6)
-#include <stdint.h>
-#include "board.h"
-#include "rcc.h"
-#include "delay.h"
-#include "usart.h"
-
-#include "thermocouple.h"
-#include "pwm.h"
-#include "i2c.h"
-#include "mlx90614.h"
-#include "pid.h"
-
-static void print_int(int v)
-{
-    char buf[16];
-    int i = 15;
-    buf[i] = '\0';
-    int neg = (v < 0);
-    if (neg) v = -v;
-
-    do {
-        buf[--i] = (char)('0' + (v % 10));
-        v /= 10;
-    } while (v);
-
-    if (neg) buf[--i] = '-';
-    usart2_write_str(&buf[i]);
-}
-
-static void print_float_1dp(float x)
-{
-    int32_t xi = (int32_t)x;
-    int32_t xf = (int32_t)((x - (float)xi) * (x >= 0 ? 10.0f : -10.0f));
-
-    if (x < 0 && xi == 0)
-        usart2_write_char('-');
-
-    print_int(xi);
-    usart2_write_char('.');
-
-    if (xf < 0) xf = -xf;
-    print_int(xf);
-}
-
-static const char* mode_to_str(int mode)
-{
-    switch (mode) {
-        case 0: return "HEATING_UP";
-        case 1: return "IN_RANGE";
-        case 2: return "STOPPED_OVER_TEMP_COOLING DOWN";
-        default: return "UNKNOWN";
-    }
-}
-
-int main(void)
-{
-    clock_init();                          // 72 MHz system clock
-    systick_init(SYSCLK_FREQ_HZ);
-
-    usart2_init(36000000UL, 115200);
-    usart2_write_str("\r\nStart PID Test: TC + IR (object), heat-only\r\n");
-
-    // Small startup delay (gives sensors time to power up)
-    delay_ms(200);
-
-    // Thermocouple (ADC)
-    tc_init();
-
-    // I2C + MLX90614
-    i2c1_init(36000000U, 100000U);  // PCLK1 = 36 MHz, I2C at 100 kHz
-
-    pwm_tim1_ch1_init(SYSCLK_FREQ_HZ, 2000U);   // 2 kHz PWM
-
-    // PID setup
-    pid_t pid;
-    const float dt_s    = 0.02f;   // 20 ms loop
-    const float setC    = 110.0f;  // target temperature in °C
-    const float out_min = 0.0f;    // heat only, 0% duty
-    const float out_max = 0.70f;   // 70% duty
-
-    // Initial gains
-//    const float Kp = 0.0886757f;
-//    const float Ki = 0.0530638f;
-
-    const float Kp = 0.0203464726870566f;
-    const float Ki = 0.0203600773423131f;
-    const float Kd = 0.0f;
-
-    pid_init(&pid, Kp, Ki, Kd, dt_s, out_min, out_max);
-
-    const float BAND_LO = 107.0f;
-    const float BAND_HI = 113.0f;
-
-    float duty = 0.0f;
-
-    while (1)
-    {
-        // Read thermocouple
-        int32_t t_x10 = tc_read_c_x10();
-        float   measC = (float)t_x10 * 0.1f;
-
-        // Read IR sensor
-        int32_t ir_obj_mdeg = 0;
-        int rc_obj = mlx90614_read_object(&ir_obj_mdeg);
-        float ir_objC = 0.0f;
-
-        if (rc_obj == 0)
-        {
-            ir_objC = (float)ir_obj_mdeg / 1000.0f;
-        }
-
-        // PID + safety logic
-        int mode = 0;
-
-        if (measC > BAND_HI)
-        {
-            // Above 103 C → safety stop
-            duty = 0.0f;
-            mode = 2;
-
-            pid.integrator  = 0.0f;
-            pid.initialized = 0;
-        }
-        else
-        {
-            float u = pid_step(&pid, setC, measC);
-            duty = u;
-
-            if (measC < BAND_LO)
-                mode = 0;  // HEATING_UP
-            else
-                mode = 1;  // HOLDIIN_RANGE
-        }
-
-        // Apply PWM to peltier
-        pwm_tim1_set(duty);
-
-        // ---- Telemetry ----
-        usart2_write_str("TC = ");
-        print_float_1dp(measC);
-        usart2_write_str(" C | IR = ");
-
-        if (rc_obj == 0)
-            print_float_1dp(ir_objC);
-        else {
-            usart2_write_str("ERR=");
-            print_int(rc_obj);
-        }
-
-        usart2_write_str(" C | duty = ");
-        print_float_1dp(duty * 100.0f);
-        usart2_write_str("% | state = ");
-        usart2_write_str(mode_to_str(mode));
-        usart2_write_str("\r\n");
-
-        // PID loop period
-        delay_ms(20);
-
-        // delay_ms(15000);
-    }
-}
-
-
-#endif
-
 #if (MAIN == 7)
 #include <stdint.h>
 #include "board.h"
@@ -967,6 +953,7 @@ int main(void)
 
 #if (MAIN == 8)
 #include <stdint.h>
+#include <math.h>
 #include "board.h"
 #include "rcc.h"
 #include "delay.h"
@@ -977,233 +964,26 @@ int main(void)
 #include "i2c.h"
 #include "mlx90614.h"
 #include "pid.h"
-#include "adc.h"   // adc1_init_single / adc1_read_single / adc2_*
-
-
-// ------------ ADC / voltage sensing config ------------
-#define PELTIER_ADC_CH   4U      // PA4 / ADC2_IN4 (change if your sense pin is different)
-#define VREF_mV          3300U   // MCU analog reference in mV
-// ------------------------------------------------------
-
-
-// ----------------- UART helpers -----------------
-static void print_int(int v)
-{
-    char buf[16];
-    int i = 15;
-    buf[i] = '\0';
-    int neg = (v < 0);
-    if (neg) v = -v;
-
-    do {
-        buf[--i] = (char)('0' + (v % 10));
-        v /= 10;
-    } while (v);
-
-    if (neg) buf[--i] = '-';
-    usart2_write_str(&buf[i]);
-}
-
-static void print_float_1dp(float x)
-{
-    int32_t xi = (int32_t)x;
-    int32_t xf = (int32_t)((x - (float)xi) * (x >= 0 ? 10.0f : -10.0f));
-
-    if (x < 0 && xi == 0)
-        usart2_write_char('-');
-
-    print_int(xi);
-    usart2_write_char('.');
-
-    if (xf < 0) xf = -xf;
-    print_int(xf);
-}
-
-static const char* mode_to_str(int mode)
-{
-    switch (mode) {
-        case 0: return "HEATING_UP";
-        case 1: return "IN_RANGE";
-        case 2: return "STOPPED_OVER_TEMP_COOLING DOWN";
-        default: return "UNKNOWN";
-    }
-}
-// ------------------------------------------------
-
-
-int main(void)
-{
-    // ---- Basic init ----
-    clock_init();                          // 72 MHz system clock
-    systick_init(SYSCLK_FREQ_HZ);
-
-    usart2_init(36000000UL, 115200);
-    usart2_write_str("\r\nStart PID Test: TC + IR(object), heat-only with Vsense\r\n");
-
-    // Small startup delay (gives sensors time to power up)
-    delay_ms(200);
-
-    // Thermocouple (ADC1 on PA1) – this calls adc1_init_single(1) inside tc_init()
-    tc_init();
-
-    // ADC2 on PA4 (ADC2_IN4) to sense Peltier/driver output voltage
-    // NOTE: make sure your sense hardware actually goes to PA4 / channel 4,
-    // or change PELTIER_ADC_CH above to match your pin.
-    adc2_init_single(PELTIER_ADC_CH);
-
-    // I2C + MLX90614
-    i2c1_init(36000000U, 100000U);  // PCLK1 = 36 MHz, I2C at 100 kHz
-
-    // PWM on TIM1 CH1 (PA8 = Arduino D7) for Peltier driver
-    pwm_tim1_ch1_init(SYSCLK_FREQ_HZ, 2000U);   // 2 kHz PWM
-
-    // ---- PID setup ----
-    pid_t pid;
-    const float dt_s    = 0.02f;   // 20 ms loop
-    const float setC    = 100.0f;  // target temperature in °C
-    const float out_min = 0.0f;    // heat only, 0% duty
-    const float out_max = 0.70f;   // 70% duty max (gentler heating)
-
-    // Your latest gains
-    const float Kp = 0.0203464726870566f;
-    const float Ki = 0.0203600773423131f;
-    const float Kd = 0.0f;
-
-    pid_init(&pid, Kp, Ki, Kd, dt_s, out_min, out_max);
-
-    // Band around setpoint: 107..113 C
-    const float BAND_LO = 103.0f;
-    const float BAND_HI = 97.0f;
-
-    float duty = 0.0f;
-
-    while (1)
-    {
-        // ---- Read thermocouple (control sensor) ----
-        int32_t t_x10 = tc_read_c_x10();      // °C * 10
-        float   measC = (float)t_x10 * 0.1f;  // °C
-
-        // ---- Read IR sensor (object) ----
-        int32_t ir_obj_mdeg = 0;
-        int rc_obj = mlx90614_read_object(&ir_obj_mdeg);
-        float ir_objC = 0.0f;
-
-        if (rc_obj == 0)
-        {
-            ir_objC = (float)ir_obj_mdeg / 1000.0f;  // m°C → °C
-        }
-
-        // ---- Read Peltier drive sense voltage via ADC2 (continuous mode) ----
-        uint16_t raw_v = adc2_read_single(PELTIER_ADC_CH);
-        float v_adc = (float)raw_v * (float)VREF_mV / 4095.0f / 1000.0f; // volts at MCU pin
-
-        // If you have a resistor divider from the actual Peltier node to PA4, e.g.:
-        //   Vreal = v_adc * (Rtop + Rbottom) / Rbottom;
-        // you can compute that here as a second value if you want.
-
-        // ---- PID + safety logic ----
-        int mode = 0;
-
-        if (measC > BAND_HI)
-        {
-            // Above upper band → safety stop
-            duty = 0.0f;
-            mode = 2;
-
-            // Reset integrator to avoid windup
-            pid.integrator  = 0.0f;
-            pid.initialized = 0;
-        }
-        else
-        {
-            // Normal PID control in heat-only mode, clamped [0, 0.70]
-            float u = pid_step(&pid, setC, measC);
-            duty = u;
-
-            if (measC < BAND_LO)
-                mode = 0;  // HEATING_UP (below 107 C)
-            else
-                mode = 1;  // IN_RANGE (107–113 C)
-        }
-
-        // ---- Apply PWM to Peltier ----
-        pwm_tim1_set(duty);
-
-        // ---- Telemetry ----
-        usart2_write_str("TC = ");
-        print_float_1dp(measC);
-        usart2_write_str(" C | IR = ");
-
-        if (rc_obj == 0)
-            print_float_1dp(ir_objC);
-        else {
-            usart2_write_str("ERR=");
-            print_int(rc_obj);
-        }
-
-        usart2_write_str(" C | duty = %");
-        print_float_1dp(duty * 100.0f);
-        // usart2_write_str("% | Vsense = ");
-        // print_float_1dp(v_adc);
-        usart2_write_str(" | state = ");
-        usart2_write_str(mode_to_str(mode));
-        usart2_write_str("\r\n");
-
-        // PID loop period (must match dt_s)
-        delay_ms(20);
-    }
-}
-
-
-#endif
-
-#if (MAIN == 9)
-
-#include <stdint.h>
-#include "board.h"
-#include "rcc.h"
-#include "delay.h"
-#include "usart.h"
-
-#include "thermocouple.h"
-#include "i2c.h"
-#include "mlx90614.h"
-#include "pid.h"
 #include "adc.h"
 
-#include "mcp4728.h"
-#include "max1968_ctl.h"
-#include "max1968_shdn.h"
+// ===================== Channel mapping (as requested) =====================
+// ADC1: Thermocouples
+#define ADC1_CH_TC1            0U      // PA0 / ADC1_IN0
+#define ADC1_CH_TC2            1U      // PA1 / ADC1_IN1
 
-// --------------------- USER CONFIG ---------------------
+// ADC2: Everything else
+#define ADC2_CH_OPT_TIA        2U      // PA2 / ADC2_IN2   (TIA output => Vtia)
+#define ADC2_CH_VSENSE         3U      // PA3 / ADC2_IN3   (Vsense)
+#define ADC2_CH_ISENSE         4U      // PA4 / ADC2_IN4   (Isense voltage output)
 
-// MCP4728 I2C address: Adafruit boards (some variants 0x64)
-#define MCP4728_ADDR     0x60u
-#define DAC_VDD_V        3.300f
+// ===================== ADC / Photodiode conversion constants =====================
+#define VREF_mV                3300U
 
-// Your MAX1968 sense resistor (OHMS) and desired current clamp (AMPS)
-#define RSENSE_OHMS      0.050f    // 50 mΩ
-#define ITEC_LIMIT_A     3.0f      // clamp PID output to +/- 3A
+#define PD_RESP_A_PER_W        0.53f       // Photodiode responsivity (A/W)
+#define TIA_RF_OHMS            100000.0f   // TIA feedback resistor (ohms)
+#define TIA_VBIAS_V            1.65f       // Output bias (V). Set to 0.0 if ground-referenced.
+#define PD_USE_MAGNITUDE       1           // 1 = abs(current)
 
-// MAX1968 reference (nominal)
-#define MAX1968_VREF_V   1.50f
-
-// ITEC monitoring ADC
-// Pick the ADC channel you wired MAX1968 ITEC into.
-// Example: PA5 = ADC2_IN5 => channel 5
-#define ITEC_ADC_CH      5U
-#define MCU_VREF_mV      3300U     // ADC reference in mV
-
-// Fault thresholds
-#define ITEC_TRACK_ERR_A 0.40f     // allowable mismatch between Icmd and Iactual (A)
-#define ITEC_MIN_RESP_A  0.10f     // if commanding > this but actual ~0, likely open circuit
-#define FAULT_COUNT_MAX  10        // consecutive cycles before shutdown (10 * 20ms = 200ms)
-
-// Band around setpoint
-#define BAND_LO_C        97.0f
-#define BAND_HI_C        103.0f
-
-// ----------------- UART helpers -----------------
 static void print_int(int v)
 {
     char buf[16];
@@ -1229,14 +1009,25 @@ static void print_float_1dp(float x)
     if (x < 0 && xi == 0)
         usart2_write_char('-');
 
-    print_int(xi);
+    print_int((int)xi);
     usart2_write_char('.');
 
     if (xf < 0) xf = -xf;
-    print_int(xf);
+    if (xf < 10) usart2_write_char((char)('0' + xf));
+    else print_int((int)xf);
 }
 
-static float absf(float x) { return (x < 0.0f) ? -x : x; }
+static void print_u32(uint32_t v)
+{
+    char buf[16];
+    int i = 15;
+    buf[i] = '\0';
+    do {
+        buf[--i] = (char)('0' + (v % 10U));
+        v /= 10U;
+    } while (v);
+    usart2_write_str(&buf[i]);
+}
 
 static const char* mode_to_str(int mode)
 {
@@ -1244,199 +1035,189 @@ static const char* mode_to_str(int mode)
         case 0: return "HEATING_UP";
         case 1: return "IN_RANGE";
         case 2: return "STOPPED_OVER_TEMP";
-        case 3: return "STOPPED_SENSOR_ERR";
-        case 4: return "STOPPED_ITEC_FAULT";
         default: return "UNKNOWN";
     }
 }
 
-static float adc_raw_to_volts(uint16_t raw)
+// ===================== ADC conversion helpers =====================
+static inline float adc12_to_volts(uint16_t raw)
 {
-    return ((float)raw * (float)MCU_VREF_mV / 4095.0f) / 1000.0f;
+    return ((float)raw * ((float)VREF_mV / 1000.0f)) / 4095.0f;
 }
 
-// ITEC equation using MAX1968 ITEC output:
-// I_actual = (Vitec - 1.50) / (8*Rsense)
-static float iteccalc_from_vitec(float vitec_v)
+static inline float tia_volts_to_current_A(float v_out)
 {
-    return (vitec_v - MAX1968_VREF_V) / (8.0f * RSENSE_OHMS);
+    float i = (v_out - TIA_VBIAS_V) / TIA_RF_OHMS;
+#if PD_USE_MAGNITUDE
+    if (i < 0.0f) i = -i;
+#endif
+    return i;
+}
+
+static inline float current_A_to_power_W(float i_A)
+{
+    return i_A / PD_RESP_A_PER_W;
 }
 
 int main(void)
 {
-    clock_init();                          // 72 MHz system clock
+    clock_init();
     systick_init(SYSCLK_FREQ_HZ);
 
     usart2_init(36000000UL, 115200);
-    usart2_write_str("\r\nStart PID Test: MAX1968 + MCP4728 CTLI, ITEC monitor, SHDN safety\r\n");
+    usart2_write_str("\r\nStart PID Test: 2x Thermocouples (ADC1) + Optical/Vsense/Isense (ADC2)\r\n");
 
     delay_ms(200);
 
-    // Thermocouple (ADC1 inside tc_init)
+    // ---- Thermocouples on ADC1 ----
+    // tc_init() should init ADC1 and put both PA0/PA1 into analog mode + sample time.
     tc_init();
 
-    // I2C for MLX90614 + MCP4728 on same bus
+    // ---- ADC2 channels (PA2/PA3/PA4) ----
+    // Initialize ADC2 and ensure all needed pins are configured for analog + sample time.
+    adc2_init_single(ADC2_CH_VSENSE);
+
+    // These helper calls are in the updated adc driver I suggested.
+    // If you haven't added them yet, add them, or configure PA2/PA3/PA4 analog in adc2_init_single().
+    adc2_enable_gpio_analog(ADC2_CH_OPT_TIA);
+    adc2_enable_gpio_analog(ADC2_CH_VSENSE);
+    adc2_enable_gpio_analog(ADC2_CH_ISENSE);
+
+    adc2_set_sample_time_max(ADC2_CH_OPT_TIA);
+    adc2_set_sample_time_max(ADC2_CH_VSENSE);
+    adc2_set_sample_time_max(ADC2_CH_ISENSE);
+
+    // ---- Other peripherals ----
     i2c1_init(36000000U, 100000U);
+    pwm_tim1_ch1_init(SYSCLK_FREQ_HZ, 2000U);
 
-    // SHDN pin control (default OFF)
-    max1968_shdn_init();
-
-    // MCP4728 DAC
-    mcp4728_t dac;
-    mcp4728_init(&dac, MCP4728_ADDR, DAC_VDD_V);
-
-    // MAX1968 CTLI control via DAC channel A
-    max1968_ctl_t tec;
-    max1968_ctl_init(&tec, &dac, MCP4728_CH_A, RSENSE_OHMS, ITEC_LIMIT_A);
-
-    // ITEC ADC input
-    adc2_init_single(ITEC_ADC_CH);
-
-    // Set safe command (0A) BEFORE enabling power stage
-    (void)max1968_set_itec_cmd_a(&tec, 0.0f);
-    delay_ms(10);
-    max1968_shdn_set(1);   // enable MAX1968 after CTLI is at 0A
-
-    // ---- PID setup ----
     pid_t pid;
-    const float dt_s    = 0.02f;    // 20 ms loop
-    const float setC    = 100.0f;   // target temperature °C
+    const float dt_s    = 0.02f;
 
-    // PID output is TEC current command in amps
-    const float out_min = -ITEC_LIMIT_A;
-    const float out_max =  ITEC_LIMIT_A;
+    const float SETPOINT_FINAL_C = 100.0f;
+    const float out_min = 0.0f;
+    const float out_max = 0.70f;
 
-    // Your latest gains (may need retuning for bidirectional TEC control)
     const float Kp = 0.0203464726870566f;
     const float Ki = 0.0203600773423131f;
     const float Kd = 0.0f;
 
     pid_init(&pid, Kp, Ki, Kd, dt_s, out_min, out_max);
 
-    float i_cmd = 0.0f;
+    const float BAND_LO = 97.0f;
+    const float BAND_HI = 103.0f;
 
-    int itec_fault_count = 0;
-    int sensor_fault_count = 0;
+    float ramp_time_s    = 300.0f;
+    float ramp_elapsed_s = 0.0f;
+    float ramp_startC    = 25.0f;
+    uint8_t ramp_started = 0;
+
+    float duty = 0.0f;
 
     while (1)
     {
-        // ---- Read thermocouple (control sensor) ----
-        int32_t t_x10 = tc_read_c_x10();      // °C * 10
-        float   measC = (float)t_x10 * 0.1f;  // °C
+        // ---- Two thermocouples via ADC1 (AD8495 -> ADC) ----
+        int32_t t1_x10 = tc_read_c_x10_ch(ADC1_CH_TC1);  // PA0
+        int32_t t2_x10 = tc_read_c_x10_ch(ADC1_CH_TC2);  // PA1
 
-        // ---- Read IR sensor (object) ----
-        int32_t ir_obj_mdeg = 0;
-        int rc_obj = mlx90614_read_object(&ir_obj_mdeg);
+        float measC1 = (float)t1_x10 * 0.1f;
+        float measC2 = (float)t2_x10 * 0.1f;
 
-        float ir_objC = 0.0f;
-        if (rc_obj == 0) {
-            ir_objC = (float)ir_obj_mdeg / 1000.0f;
-            sensor_fault_count = 0;
-        } else {
-            // allow a few transient errors
-            sensor_fault_count++;
-        }
+        // Choose which thermocouple drives the PID control
+        float measC = measC1;
 
-        // ---- Read ITEC monitor voltage ----
-        uint16_t raw_it = adc2_read_single(ITEC_ADC_CH);
-        float vitec_v = adc_raw_to_volts(raw_it);
-        float i_actual = iteccalc_from_vitec(vitec_v);
-
-        // ---- Control + safety ----
-        int mode = 0;
-
-        // SENSOR ERROR SHUTDOWN (optional)
-        if (sensor_fault_count > 10)  // ~200ms of errors
+        if (!ramp_started)
         {
-            i_cmd = 0.0f;
-            (void)max1968_set_itec_cmd_a(&tec, 0.0f);
-            max1968_shdn_set(0);
-            mode = 3;
-
+            ramp_startC    = measC;
+            ramp_elapsed_s = 0.0f;
+            ramp_started   = 1;
             pid.integrator  = 0.0f;
             pid.initialized = 0;
         }
-        // OVERTEMP SHUTDOWN
-        else if (measC > BAND_HI_C)
-        {
-            i_cmd = 0.0f;
-            (void)max1968_set_itec_cmd_a(&tec, 0.0f);
-            max1968_shdn_set(0);
-            mode = 2;
 
+        ramp_elapsed_s += dt_s;
+
+        float alpha = ramp_elapsed_s / ramp_time_s;
+        if (alpha > 1.0f) alpha = 1.0f;
+        float setC = ramp_startC + alpha * (SETPOINT_FINAL_C - ramp_startC);
+
+        // ---- ADC2 reads ----
+        // Optical power sensor (TIA output voltage)
+        uint16_t raw_opt = adc2_read_single(ADC2_CH_OPT_TIA);
+        float Vtia = adc12_to_volts(raw_opt);
+
+        // Vsense
+        uint16_t raw_vs = adc2_read_single(ADC2_CH_VSENSE);
+        float Vsense = adc12_to_volts(raw_vs);
+
+        // Isense (currently just the sensed voltage; convert to amps once you define shunt/gain)
+        uint16_t raw_is = adc2_read_single(ADC2_CH_ISENSE);
+        float Visense = adc12_to_volts(raw_is);
+
+        // Photodiode current + optical power
+        float Ipd_A  = tia_volts_to_current_A(Vtia);
+        float Popt_W = current_A_to_power_W(Ipd_A);
+
+        uint32_t Ipd_uA  = (uint32_t)(Ipd_A  * 1e6f + 0.5f);
+        uint32_t Popt_uW = (uint32_t)(Popt_W * 1e6f + 0.5f);
+
+        // ---- Safety: stop if EITHER thermocouple is above BAND_HI ----
+        int mode = 0;
+        if ((measC1 > BAND_HI) || (measC2 > BAND_HI))
+        {
+            duty = 0.0f;
+            mode = 2;
             pid.integrator  = 0.0f;
             pid.initialized = 0;
         }
         else
         {
-            // Ensure enabled in normal operation
-            max1968_shdn_set(1);
-
-            // PID command in AMPS (can be +/-)
-            i_cmd = pid_step(&pid, setC, measC);
-
-            // Apply command
-            (void)max1968_set_itec_cmd_a(&tec, i_cmd);
-
-            // --- ITEC tracking fault detection ---
-            // If we command a decent magnitude, actual current should be close.
-            // This detects open TEC / unplugged harness / hard current limit odd behavior.
-            float err_a = absf(i_cmd - i_actual);
-
-            if (absf(i_cmd) > ITEC_MIN_RESP_A)
-            {
-                // If actual current is very small OR mismatch is large, count fault
-                if ((absf(i_actual) < (ITEC_MIN_RESP_A * 0.5f)) || (err_a > ITEC_TRACK_ERR_A))
-                    itec_fault_count++;
-                else
-                    itec_fault_count = 0;
-            }
-            else
-            {
-                // near zero command: don't judge tracking
-                itec_fault_count = 0;
-            }
-
-            if (itec_fault_count >= FAULT_COUNT_MAX)
-            {
-                // Hard shutdown
-                i_cmd = 0.0f;
-                (void)max1968_set_itec_cmd_a(&tec, 0.0f);
-                max1968_shdn_set(0);
-                mode = 4;
-
-                pid.integrator  = 0.0f;
-                pid.initialized = 0;
-                itec_fault_count = 0;
-            }
-            else
-            {
-                // Mode labeling (optional)
-                mode = (measC < BAND_LO_C) ? 0 : 1;
-            }
+            float u = pid_step(&pid, setC, measC);
+            duty = u;
+            mode = (measC < BAND_LO) ? 0 : 1;
         }
 
-        float vctli = max1968_i_to_vctli(&tec, i_cmd);
+        pwm_tim1_set(duty);
 
-        // ---- Telemetry ----
-        usart2_write_str("TC=");
-        print_float_1dp(measC);
-        usart2_write_str("C | IR=");
+        // ---- Print ----
+        usart2_write_str("TC1=");
+        print_float_1dp(measC1);
+        usart2_write_str("C | TC2=");
+        print_float_1dp(measC2);
+        usart2_write_str("C | SP=");
+        print_float_1dp(setC);
+        usart2_write_str("C | duty=");
+        print_float_1dp(duty * 100.0f);
+        usart2_write_str("%");
 
-        if (rc_obj == 0) print_float_1dp(ir_objC);
-        else { usart2_write_str("ERR="); print_int(rc_obj); }
+        usart2_write_str(" | Vtia=");
+        print_float_1dp(Vtia);
+        usart2_write_str("V");
 
-        usart2_write_str("C | Icmd=");
-        print_float_1dp(i_cmd);
-        usart2_write_str("A | Iact=");
-        print_float_1dp(i_actual);
-        usart2_write_str("A | VCTLI=");
-        print_float_1dp(vctli);
-        usart2_write_str("V | VITEC=");
-        print_float_1dp(vitec_v);
-        usart2_write_str("V | state=");
+        usart2_write_str(" | Vsense=");
+        print_float_1dp(Vsense);
+        usart2_write_str("V");
+
+        usart2_write_str(" | Visense=");
+        print_float_1dp(Visense);
+        usart2_write_str("V");
+
+        usart2_write_str(" | Ipd=");
+        print_u32(Ipd_uA);
+        usart2_write_str("uA");
+
+        usart2_write_str(" | Popt=");
+        print_u32(Popt_uW);
+        usart2_write_str("uW");
+
+        usart2_write_str(" | state=");
         usart2_write_str(mode_to_str(mode));
-        usart2_write_str("\r\n");
+
+        usart2_write_str(" | ramp=");
+        print_float_1dp(ramp_elapsed_s);
+        usart2_write_str("/");
+        print_float_1dp(ramp_time_s);
+        usart2_write_str("s\r\n");
 
         delay_ms(20);
     }
@@ -1444,562 +1225,586 @@ int main(void)
 
 #endif
 
-#if (MAIN == 10)
+#if (MAIN == MENU_N_8)
 #include <stdint.h>
+#include <string.h>
+#include <ctype.h>
+#include <stdlib.h>   // strtof
+#include <math.h>
 
-/* =========================
-   Minimal STM32F103 register map
-   (enough for RCC, GPIOB, AFIO, I2C1)
-   ========================= */
+#include "board.h"
+#include "rcc.h"
+#include "delay.h"
+#include "usart.h"
 
-#define PERIPH_BASE        0x40000000UL
-#define APB1PERIPH_BASE    (PERIPH_BASE + 0x00000000UL)
-#define APB2PERIPH_BASE    (PERIPH_BASE + 0x00010000UL)
+#include "thermocouple.h"
+#include "pwm.h"
+#include "i2c.h"
+#include "mlx90614.h"
+#include "pid.h"
+#include "adc.h"
 
-#define RCC_BASE           (APB2PERIPH_BASE + 0x00009000UL)
-#define AFIO_BASE          (APB2PERIPH_BASE + 0x00000000UL)
-#define GPIOB_BASE         (APB2PERIPH_BASE + 0x00000C00UL)
-#define I2C1_BASE          (APB1PERIPH_BASE + 0x00005400UL)
+// ===================== Channel mapping (as requested) =====================
+// ADC1: Thermocouples
+#define ADC1_CH_TC1            0U      // PA0 / ADC1_IN0
+#define ADC1_CH_TC2            1U      // PA1 / ADC1_IN1
 
-typedef struct {
-  volatile uint32_t CR;
-  volatile uint32_t CFGR;
-  volatile uint32_t CIR;
-  volatile uint32_t APB2RSTR;
-  volatile uint32_t APB1RSTR;
-  volatile uint32_t AHBENR;
-  volatile uint32_t APB2ENR;
-  volatile uint32_t APB1ENR;
-  volatile uint32_t BDCR;
-  volatile uint32_t CSR;
-} RCC_TypeDef;
+// ADC2: Everything else
+#define ADC2_CH_OPT_TIA        2U      // PA2 / ADC2_IN2   (TIA output => Vtia)
+#define ADC2_CH_VSENSE         3U      // PA3 / ADC2_IN3   (Vsense)
+#define ADC2_CH_ISENSE         4U      // PA4 / ADC2_IN4   (Isense voltage output)
 
-typedef struct {
-  volatile uint32_t EVCR;
-  volatile uint32_t MAPR;
-  volatile uint32_t EXTICR[4];
-  volatile uint32_t MAPR2;
-} AFIO_TypeDef;
+// ===================== ADC / Photodiode conversion constants =====================
+#define VREF_mV                3300U
 
-typedef struct {
-  volatile uint32_t CRL;
-  volatile uint32_t CRH;
-  volatile uint32_t IDR;
-  volatile uint32_t ODR;
-  volatile uint32_t BSRR;
-  volatile uint32_t BRR;
-  volatile uint32_t LCKR;
-} GPIO_TypeDef;
+#define PD_RESP_A_PER_W        0.53f       // Photodiode responsivity (A/W)
+#define TIA_RF_OHMS            100000.0f   // TIA feedback resistor (ohms)
+#define TIA_VBIAS_V            1.65f       // Output bias (V). Set to 0.0 if ground-referenced.
+#define PD_USE_MAGNITUDE       1           // 1 = abs(current)
 
-typedef struct {
-  volatile uint32_t CR1;
-  volatile uint32_t CR2;
-  volatile uint32_t OAR1;
-  volatile uint32_t OAR2;
-  volatile uint32_t DR;
-  volatile uint32_t SR1;
-  volatile uint32_t SR2;
-  volatile uint32_t CCR;
-  volatile uint32_t TRISE;
-} I2C_TypeDef;
+// ----------------- UART print helpers -----------------
+static void print_int(int v)
+{
+    char buf[16];
+    int i = 15;
+    buf[i] = '\0';
+    int neg = (v < 0);
+    if (neg) v = -v;
 
-#define RCC   ((RCC_TypeDef*)RCC_BASE)
-#define AFIO  ((AFIO_TypeDef*)AFIO_BASE)
-#define GPIOB ((GPIO_TypeDef*)GPIOB_BASE)
-#define I2C1  ((I2C_TypeDef*)I2C1_BASE)
+    do {
+        buf[--i] = (char)('0' + (v % 10));
+        v /= 10;
+    } while (v);
 
-/* =========================
-   Bit helpers / constants
-   ========================= */
+    if (neg) buf[--i] = '-';
+    usart2_write_str(&buf[i]);
+}
 
-#define RCC_APB2ENR_AFIOEN   (1U << 0)
-#define RCC_APB2ENR_IOPBEN   (1U << 3)
-#define RCC_APB1ENR_I2C1EN   (1U << 21)
+static void print_u32(uint32_t v)
+{
+    char buf[16];
+    int i = 15;
+    buf[i] = '\0';
+    do {
+        buf[--i] = (char)('0' + (v % 10U));
+        v /= 10U;
+    } while (v);
+    usart2_write_str(&buf[i]);
+}
 
-#define RCC_APB1RSTR_I2C1RST (1U << 21)
+static void print_float_1dp(float x)
+{
+    int32_t xi = (int32_t)x;
+    float frac = x - (float)xi;
+    if (x < 0 && frac != 0) frac = -frac;
 
-/* AFIO MAPR: I2C1_REMAP is bit 1 on STM32F1 */
-#define AFIO_MAPR_I2C1_REMAP (1U << 1)
+    int32_t xf = (int32_t)(frac * 10.0f + (x >= 0 ? 0.5f : -0.5f));
 
-/* I2C CR1 bits */
-#define I2C_CR1_PE           (1U << 0)
-#define I2C_CR1_START        (1U << 8)
-#define I2C_CR1_STOP         (1U << 9)
-#define I2C_CR1_ACK          (1U << 10)
-#define I2C_CR1_SWRST        (1U << 15)
+    if (x < 0 && xi == 0) usart2_write_char('-');
+    print_int((int)xi);
+    usart2_write_char('.');
+    if (xf < 0) xf = -xf;
+    usart2_write_char((char)('0' + (xf % 10)));
+}
 
-/* I2C SR1 bits */
-#define I2C_SR1_SB           (1U << 0)
-#define I2C_SR1_ADDR         (1U << 1)
-#define I2C_SR1_BTF          (1U << 2)
-#define I2C_SR1_TXE          (1U << 7)
-#define I2C_SR1_AF           (1U << 10)
+typedef enum {
+    UI_STREAM = 0,
+    UI_CONFIG = 1,
+    UI_HALT   = 2
+} ui_mode_t;
 
-/* I2C SR2 bits */
-#define I2C_SR2_BUSY         (1U << 1)
-
-/* =========================
-   Simple delay (blocking)
-   Assumes ~8MHz-ish core clock.
-   Adjust if needed.
-   ========================= */
-static void delay_ms(uint32_t ms) {
-  for (uint32_t i = 0; i < ms; i++) {
-    for (volatile uint32_t j = 0; j < 8000; j++) {
-      __asm volatile ("nop");
+static const char* ui_mode_to_str(ui_mode_t m)
+{
+    switch (m) {
+        case UI_STREAM: return "STREAM";
+        case UI_CONFIG: return "CONFIG";
+        case UI_HALT:   return "HALT";
+        default:        return "UNKNOWN";
     }
-  }
 }
 
-/* =========================
-   I2C low-level functions
-   ========================= */
-
-static int i2c1_start(void) {
-  /* Wait until bus not busy */
-  uint32_t timeout = 200000;
-  while ((I2C1->SR2 & I2C_SR2_BUSY) && timeout--) { }
-  if (!timeout) return -1;
-
-  I2C1->CR1 |= I2C_CR1_START;
-
-  timeout = 200000;
-  while (!(I2C1->SR1 & I2C_SR1_SB) && timeout--) { }
-  if (!timeout) return -2;
-
-  return 0;
-}
-
-static int i2c1_send_addr_write(uint8_t addr7) {
-  I2C1->DR = (uint32_t)(addr7 << 1); /* write = 0 */
-
-  uint32_t timeout = 200000;
-  while (!(I2C1->SR1 & I2C_SR1_ADDR) && timeout--) {
-    if (I2C1->SR1 & I2C_SR1_AF) { /* NACK */
-      I2C1->SR1 &= ~I2C_SR1_AF;
-      return -3;
+static const char* heat_state_to_str(int state)
+{
+    switch (state) {
+        case 0: return "HEATING_UP";
+        case 1: return "IN_RANGE";
+        case 2: return "STOPPED_OVER_TEMP";
+        default:return "UNKNOWN";
     }
-  }
-  if (!timeout) return -4;
-
-  /* Clear ADDR by reading SR1 then SR2 */
-  (void)I2C1->SR1;
-  (void)I2C1->SR2;
-
-  return 0;
 }
 
-static int i2c1_write_byte(uint8_t b) {
-  uint32_t timeout = 200000;
-  while (!(I2C1->SR1 & I2C_SR1_TXE) && timeout--) { }
-  if (!timeout) return -5;
-
-  I2C1->DR = b;
-
-  return 0;
+// ===================== ADC conversion helpers =====================
+static inline float adc12_to_volts(uint16_t raw)
+{
+    return ((float)raw * ((float)VREF_mV / 1000.0f)) / 4095.0f;
 }
 
-static int i2c1_stop_after_btf(void) {
-  uint32_t timeout = 200000;
-  while (!(I2C1->SR1 & I2C_SR1_BTF) && timeout--) { }
-  if (!timeout) return -6;
-
-  I2C1->CR1 |= I2C_CR1_STOP;
-  return 0;
+static inline float tia_volts_to_current_A(float v_out)
+{
+    float i = (v_out - TIA_VBIAS_V) / TIA_RF_OHMS;
+#if PD_USE_MAGNITUDE
+    if (i < 0.0f) i = -i;
+#endif
+    return i;
 }
 
-/* =========================
-   MCP4728 write: set all 4 channels
-   addr confirmed in your scan: 0x60
-   Data format: 1 cmd + 8 bytes (2 per channel)
-   ========================= */
-
-static int mcp4728_write_all(uint8_t addr7, uint16_t va, uint16_t vb, uint16_t vc, uint16_t vd) {
-  /* Clamp to 12-bit */
-  va &= 0x0FFF; vb &= 0x0FFF; vc &= 0x0FFF; vd &= 0x0FFF;
-
-  /* Packet:
-     [0] command
-     [1..8] two bytes per channel A,B,C,D: (D11..D4), (D3..D0 in upper nibble)
-  */
-  uint8_t buf[9];
-  buf[0] = 0xC0; /* Fast write all channels (common usage). */
-
-  uint16_t v[4] = {va, vb, vc, vd};
-  for (int ch = 0; ch < 4; ch++) {
-    buf[1 + 2*ch] = (uint8_t)(v[ch] >> 4);
-    buf[2 + 2*ch] = (uint8_t)((v[ch] & 0x0F) << 4);
-  }
-
-  int rc = i2c1_start();
-  if (rc) { I2C1->CR1 |= I2C_CR1_STOP; return rc; }
-
-  rc = i2c1_send_addr_write(addr7);
-  if (rc) { I2C1->CR1 |= I2C_CR1_STOP; return rc; }
-
-  for (int i = 0; i < 9; i++) {
-    rc = i2c1_write_byte(buf[i]);
-    if (rc) { I2C1->CR1 |= I2C_CR1_STOP; return rc; }
-  }
-
-  rc = i2c1_stop_after_btf();
-  return rc;
+static inline float current_A_to_power_W(float i_A)
+{
+    return i_A / PD_RESP_A_PER_W;
 }
 
-/* =========================
-   Init: clocks + GPIOB + I2C1 (PB8/PB9 remap)
-   This assumes APB1 (PCLK1) = 8 MHz.
-   If your clock is different, update I2C timings below.
-   ========================= */
-
-static void i2c1_init_pb8_pb9_100khz_pclk1_8mhz(void) {
-  /* Enable clocks: AFIO + GPIOB + I2C1 */
-  RCC->APB2ENR |= (RCC_APB2ENR_AFIOEN | RCC_APB2ENR_IOPBEN);
-  RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;
-
-  /* Remap I2C1 to PB8/PB9 */
-  AFIO->MAPR |= AFIO_MAPR_I2C1_REMAP;
-
-  /* Configure PB8 (SCL), PB9 (SDA) as Alternate Function Open-Drain, 50 MHz
-     For F1: CNF=11 (AF OD), MODE=11 (50MHz) => 0b1111 per pin
-     PB8 is CRH bits [3:0], PB9 is CRH bits [7:4]
-  */
-  GPIOB->CRH &= ~((0xFU << 0) | (0xFU << 4));
-  GPIOB->CRH |=  ((0xFU << 0) | (0xFU << 4));
-
-  /* Reset I2C1 */
-  RCC->APB1RSTR |= RCC_APB1RSTR_I2C1RST;
-  RCC->APB1RSTR &= ~RCC_APB1RSTR_I2C1RST;
-
-  /* Disable before configuring */
-  I2C1->CR1 &= ~I2C_CR1_PE;
-
-  /* CR2 = PCLK1 frequency in MHz (assumed 8 MHz) */
-  I2C1->CR2 = 8;
-
-  /* Own address: bit14 must be kept at 1 in OAR1 */
-  I2C1->OAR1 = (1U << 14);
-
-  /* Standard mode 100 kHz:
-     CCR = PCLK1 / (2*Fscl) = 8MHz / (2*100k) = 40
-  */
-  I2C1->CCR = 40;
-
-  /* TRISE = PCLK1_MHz + 1 = 8 + 1 = 9 */
-  I2C1->TRISE = 9;
-
-  /* Enable peripheral */
-  I2C1->CR1 |= I2C_CR1_PE;
+// ======================================================
+// UART RX helpers (nonblocking key + blocking line w/ echo)
+// ======================================================
+static int usart2_try_read_char(char *out)
+{
+#if defined(USART2)
+    if (USART2->SR & (1U << 5)) {          // RXNE
+        *out = (char)(USART2->DR & 0xFF);  // read clears RXNE
+        return 1;
+    }
+    return 0;
+#else
+    (void)out;
+    return 0;
+#endif
 }
 
-/* =========================
-   main
-   ========================= */
+static void uart_read_line_echo(char *buf, uint32_t buf_sz)
+{
+    uint32_t len = 0;
+    while (1) {
+        char c;
+        while (!usart2_try_read_char(&c)) { /* block */ }
 
-int main(void) {
-  /* NOTE:
-     This example does NOT reconfigure the system clock.
-     It assumes PCLK1 is 8 MHz (common after reset if you haven't boosted clocks).
-     If your project runs PCLK1 at 36 MHz (typical 72MHz system), update:
-       CR2 = 36
-       CCR = 180   (36MHz / (2*100k))
-       TRISE = 37
-  */
+        if (c == '\r' || c == '\n') {
+            usart2_write_str("\r\n");
+            break;
+        }
+        if (c == '\b' || c == 127) {
+            if (len > 0) {
+                len--;
+                usart2_write_str("\b \b");
+            }
+            continue;
+        }
+        if ((unsigned char)c < 32) continue;
 
-  i2c1_init_pb8_pb9_100khz_pclk1_8mhz();
+        if (len < (buf_sz - 1)) {
+            buf[len++] = c;
+            usart2_write_char(c); // echo
+        }
+    }
+    buf[len] = '\0';
+}
 
-  const uint8_t MCP4728_ADDR = 0x60; /* you measured 'a=96' -> 0x60 */
+static int parse_float_line(const char *s, float *out)
+{
+    while (*s && isspace((unsigned char)*s)) s++;
+    if (*s == '\0') return 0;
 
-  while (1) {
-    /* Set 1: all different */
-    (void)mcp4728_write_all(MCP4728_ADDR, 1024, 2048, 3072, 4095);
-    delay_ms(1000);
+    char *endp = NULL;
+    float v = strtof(s, &endp);
+    if (endp == s) return 0;
 
-    /* Set 2: swapped */
-    (void)mcp4728_write_all(MCP4728_ADDR, 4095, 3072, 2048, 1024);
-    delay_ms(1000);
-  }
+    while (*endp && isspace((unsigned char)*endp)) endp++;
+    if (*endp != '\0') return 0;
+
+    *out = v;
+    return 1;
+}
+
+// Read menu keys without blocking; echoes the key
+static int ui_poll_menu_key_nonblocking(char *key_out)
+{
+    char c;
+    if (!usart2_try_read_char(&c)) return 0;
+
+    usart2_write_char(c);
+    if (c == '\r' || c == '\n') usart2_write_str("\r\n");
+
+    *key_out = c;
+    return 1;
+}
+
+static void print_menu(void)
+{
+    usart2_write_str("\r\n=== MENU ===\r\n");
+    usart2_write_str("1) Start/Resume RUN (20ms stream)\r\n");
+    usart2_write_str("2) CONFIG: stop heating + change setpoints/ramp\r\n");
+    usart2_write_str("3) HALT: heating OFF (pause ramp) \r\n");
+    usart2_write_str("m) Print menu\r\n");
+    usart2_write_str("s) Print current settings\r\n");
+    usart2_write_str("============\r\n");
+}
+
+static void print_settings(float target_final, float ub, float lb, float ramp_time_s)
+{
+    usart2_write_str("TargetFinal=");
+    print_float_1dp(target_final);
+    usart2_write_str("C  UB=");
+    print_float_1dp(ub);
+    usart2_write_str("C  LB=");
+    print_float_1dp(lb);
+    usart2_write_str("C  RampTime=");
+    print_float_1dp(ramp_time_s);
+    usart2_write_str("s\r\n");
+}
+
+static void run_config_dialog(float *p_target_final,
+                              float *p_ub,
+                              float *p_lb,
+                              float *p_ramp_time_s,
+                              pid_t *pid,
+                              uint8_t *p_ramp_started,
+                              float *p_ramp_elapsed_s)
+{
+    char line[64];
+    float v;
+
+    usart2_write_str("\r\n--- CONFIG MODE ---\r\n");
+    usart2_write_str("Heating OFF. Enter values in degC (ramp in seconds).\r\n");
+
+    // Target Final
+    while (1) {
+        usart2_write_str("Temperature Target FINAL setpoint = ");
+        uart_read_line_echo(line, sizeof(line));
+        if (parse_float_line(line, &v)) {
+            *p_target_final = v;
+            pid->integrator  = 0.0f;
+            pid->initialized = 0;
+            break;
+        }
+        usart2_write_str("Invalid number. Try again.\r\n");
+    }
+
+    // UB
+    while (1) {
+        usart2_write_str("Temperature UB setpoint = ");
+        uart_read_line_echo(line, sizeof(line));
+        if (parse_float_line(line, &v)) {
+            *p_ub = v;
+            break;
+        }
+        usart2_write_str("Invalid number. Try again.\r\n");
+    }
+
+    // LB
+    while (1) {
+        usart2_write_str("Temperature LB setpoint = ");
+        uart_read_line_echo(line, sizeof(line));
+        if (parse_float_line(line, &v)) {
+            *p_lb = v;
+            break;
+        }
+        usart2_write_str("Invalid number. Try again.\r\n");
+    }
+
+    // Ramp time
+    while (1) {
+        usart2_write_str("Ramp time (seconds) = ");
+        uart_read_line_echo(line, sizeof(line));
+        if (parse_float_line(line, &v) && v > 0.0f) {
+            *p_ramp_time_s = v;
+            break;
+        }
+        usart2_write_str("Invalid number (must be > 0). Try again.\r\n");
+    }
+
+    if (!(*p_lb < *p_ub)) {
+        usart2_write_str("ERROR: LB must be < UB. Re-enter config.\r\n");
+        return;
+    }
+
+    // Restart ramp from current temperature when resuming
+    *p_ramp_started   = 0;
+    *p_ramp_elapsed_s = 0.0f;
+
+    usart2_write_str("\r\nSaved settings: ");
+    print_settings(*p_target_final, *p_ub, *p_lb, *p_ramp_time_s);
+    usart2_write_str("Press 1 to resume RUN.\r\n");
+}
+
+int main(void)
+{
+    clock_init();
+    systick_init(SYSCLK_FREQ_HZ);
+
+    usart2_init(36000000UL, 115200);
+    usart2_write_str("\r\nStart PID Test + Menu: 2x Thermocouples (ADC1) + Optical/Vsense/Isense (ADC2)\r\n");
+
+    delay_ms(200);
+
+    // ---- Thermocouples on ADC1 ----
+    // Requires your updated thermocouple module to expose tc_read_c_x10_ch()
+    tc_init();
+
+    // ---- ADC2 init + enable channels on PA2/PA3/PA4 ----
+    adc2_init_single(ADC2_CH_VSENSE);
+    adc2_enable_gpio_analog(ADC2_CH_OPT_TIA);
+    adc2_enable_gpio_analog(ADC2_CH_VSENSE);
+    adc2_enable_gpio_analog(ADC2_CH_ISENSE);
+
+    adc2_set_sample_time_max(ADC2_CH_OPT_TIA);
+    adc2_set_sample_time_max(ADC2_CH_VSENSE);
+    adc2_set_sample_time_max(ADC2_CH_ISENSE);
+
+    // ---- Other peripherals ----
+    i2c1_init(36000000U, 100000U);
+    pwm_tim1_ch1_init(SYSCLK_FREQ_HZ, 2000U);
+
+    // PID
+    pid_t pid;
+    const float dt_s = 0.02f;
+
+    // Settings (modifiable via menu)
+    float target_finalC = 100.0f;
+    float ubC           = 103.0f;
+    float lbC           = 97.0f;
+    float ramp_time_s   = 300.0f;
+
+    const float out_min = 0.0f;
+    const float out_max = 0.70f;
+
+    const float Kp = 0.0203464726870566f;
+    const float Ki = 0.0203600773423131f;
+    const float Kd = 0.0f;
+
+    pid_init(&pid, Kp, Ki, Kd, dt_s, out_min, out_max);
+
+    // Ramp state
+    float   ramp_elapsed_s = 0.0f;
+    float   ramp_startC    = 25.0f;
+    uint8_t ramp_started   = 0;
+
+    ui_mode_t ui = UI_STREAM;
+
+    print_menu();
+    usart2_write_str("Current settings: ");
+    print_settings(target_finalC, ubC, lbC, ramp_time_s);
+
+    float duty = 0.0f;
+
+    // For HALT/CONFIG periodic monitoring prints
+    uint32_t idle_print_ms_accum = 0;
+
+    while (1)
+    {
+        // -------- Menu key handling (always active) --------
+        char key;
+        if (ui_poll_menu_key_nonblocking(&key)) {
+            if (key == '1') {
+                ui = UI_STREAM;
+                usart2_write_str("\r\nRUN: streaming ON (20ms). Ramp resumes.\r\n");
+            } else if (key == '2') {
+                ui = UI_CONFIG;
+                usart2_write_str("\r\nEntering CONFIG (heating OFF, ramp paused)\r\n");
+            } else if (key == '3') {
+                ui = UI_HALT;
+                usart2_write_str("\r\nHALT: heating OFF, ramp paused\r\n");
+            } else if (key == 'm' || key == 'M') {
+                print_menu();
+            } else if (key == 's' || key == 'S') {
+                usart2_write_str("Settings: ");
+                print_settings(target_finalC, ubC, lbC, ramp_time_s);
+            }
+        }
+
+        // -------- Always read thermocouples (for safety + UI) --------
+        int32_t t1_x10 = tc_read_c_x10_ch(ADC1_CH_TC1);
+        int32_t t2_x10 = tc_read_c_x10_ch(ADC1_CH_TC2);
+
+        float measC1 = (float)t1_x10 * 0.1f;
+        float measC2 = (float)t2_x10 * 0.1f;
+
+        // Choose which TC drives PID (TC1)
+        float measC = measC1;
+
+        // -------- HALT MODE --------
+        if (ui == UI_HALT) {
+            pwm_tim1_set(0.0f);
+            duty = 0.0f;
+
+            pid.integrator  = 0.0f;
+            pid.initialized = 0;
+
+            // Optional: print monitoring line every 250ms
+            idle_print_ms_accum += 20;
+            if (idle_print_ms_accum >= 250) {
+                idle_print_ms_accum = 0;
+
+                usart2_write_str("[HALT] TC1=");
+                print_float_1dp(measC1);
+                usart2_write_str("C TC2=");
+                print_float_1dp(measC2);
+                usart2_write_str("C (UB=");
+                print_float_1dp(ubC);
+                usart2_write_str("C)\r\n");
+            }
+
+            delay_ms(20);
+            continue;
+        }
+
+        // -------- CONFIG MODE --------
+        if (ui == UI_CONFIG) {
+            pwm_tim1_set(0.0f);
+            duty = 0.0f;
+
+            pid.integrator  = 0.0f;
+            pid.initialized = 0;
+
+            run_config_dialog(&target_finalC, &ubC, &lbC, &ramp_time_s,
+                              &pid, &ramp_started, &ramp_elapsed_s);
+
+            // Stay stopped until user chooses 1 (or halt)
+            while (1) {
+                char k;
+                if (ui_poll_menu_key_nonblocking(&k)) {
+                    if (k == '1') {
+                        ui = UI_STREAM;
+                        usart2_write_str("\r\nRUN\r\n");
+                        break;
+                    } else if (k == '3') {
+                        ui = UI_HALT;
+                        usart2_write_str("\r\nHALT\r\n");
+                        break;
+                    } else if (k == '2') {
+                        run_config_dialog(&target_finalC, &ubC, &lbC, &ramp_time_s,
+                                          &pid, &ramp_started, &ramp_elapsed_s);
+                    } else if (k == 'm' || k == 'M') {
+                        print_menu();
+                    } else if (k == 's' || k == 'S') {
+                        usart2_write_str("Settings: ");
+                        print_settings(target_finalC, ubC, lbC, ramp_time_s);
+                    }
+                }
+
+                // minimal monitoring line every 250ms
+                idle_print_ms_accum += 20;
+                if (idle_print_ms_accum >= 250) {
+                    idle_print_ms_accum = 0;
+
+                    // re-read TC quickly for current view
+                    int32_t tt1_x10 = tc_read_c_x10_ch(ADC1_CH_TC1);
+                    int32_t tt2_x10 = tc_read_c_x10_ch(ADC1_CH_TC2);
+                    float m1 = (float)tt1_x10 * 0.1f;
+                    float m2 = (float)tt2_x10 * 0.1f;
+
+                    usart2_write_str("[CFG] TC1=");
+                    print_float_1dp(m1);
+                    usart2_write_str("C TC2=");
+                    print_float_1dp(m2);
+                    usart2_write_str("C\r\n");
+                }
+
+                delay_ms(20);
+            }
+
+            continue;
+        }
+
+        // -------- STREAM MODE (20ms loop) --------
+        idle_print_ms_accum = 0;
+
+        // Start ramp from current temp when entering RUN after config (or first time)
+        if (!ramp_started) {
+            ramp_startC    = measC;     // TC1 as ramp reference
+            ramp_elapsed_s = 0.0f;
+            ramp_started   = 1;
+            pid.integrator  = 0.0f;
+            pid.initialized = 0;
+        }
+
+        // Ramp progresses only in STREAM mode
+        ramp_elapsed_s += dt_s;
+        float alpha = ramp_elapsed_s / ramp_time_s;
+        if (alpha > 1.0f) alpha = 1.0f;
+
+        float setC = ramp_startC + alpha * (target_finalC - ramp_startC);
+
+        // ---- ADC2 reads ----
+        uint16_t raw_opt = adc2_read_single(ADC2_CH_OPT_TIA);
+        float Vtia = adc12_to_volts(raw_opt);
+
+        uint16_t raw_vs = adc2_read_single(ADC2_CH_VSENSE);
+        float Vsense = adc12_to_volts(raw_vs);
+
+        uint16_t raw_is = adc2_read_single(ADC2_CH_ISENSE);
+        float Visense = adc12_to_volts(raw_is);
+
+        float Ipd_A  = tia_volts_to_current_A(Vtia);
+        float Popt_W = current_A_to_power_W(Ipd_A);
+
+        uint32_t Ipd_uA  = (uint32_t)(Ipd_A  * 1e6f + 0.5f);
+        uint32_t Popt_uW = (uint32_t)(Popt_W * 1e6f + 0.5f);
+
+        // ---- Safety: stop if EITHER thermocouple exceeds UB ----
+        int heat_state = 0;
+
+        if (measC1 > ubC) {
+            duty = 0.0f;
+            heat_state = 2;
+            pid.integrator  = 0.0f;
+            pid.initialized = 0;
+        } else {
+            float u = pid_step(&pid, setC, measC); // measC == measC1
+            duty = u;
+            heat_state = (measC1 < lbC) ? 0 : 1;
+        }
+
+
+        pwm_tim1_set(duty);
+
+        // ---- Telemetry ----
+        usart2_write_str("TC1=");
+        print_float_1dp(measC1);
+        usart2_write_str("C | TC2=");
+        print_float_1dp(measC2);
+        usart2_write_str("C | SP=");
+        print_float_1dp(setC);
+        usart2_write_str("C | duty=");
+        print_float_1dp(duty * 100.0f);
+        usart2_write_str("%");
+
+        usart2_write_str(" | Vsense=");
+        print_float_1dp(Vsense);
+        usart2_write_str("V");
+
+        usart2_write_str(" | Vtia=");
+        print_float_1dp(Vtia);
+        usart2_write_str("V");
+
+        usart2_write_str(" | Ipd=");
+        print_u32(Ipd_uA);
+        usart2_write_str("uA");
+
+        usart2_write_str(" | Popt=");
+        print_u32(Popt_uW);
+        usart2_write_str("uW");
+
+        usart2_write_str(" | Visense=");
+        print_float_1dp(Visense);
+        usart2_write_str("V");
+
+        usart2_write_str(" | state=");
+        usart2_write_str(heat_state_to_str(heat_state));
+
+        usart2_write_str(" | ui=");
+        usart2_write_str(ui_mode_to_str(ui));
+
+        usart2_write_str(" | ramp=");
+        print_float_1dp(ramp_elapsed_s);
+        usart2_write_str("/");
+        print_float_1dp(ramp_time_s);
+        usart2_write_str("s\r\n");
+
+        delay_ms(20);
+    }
 }
 
 #endif
 
-#if (MAIN == 11)
-#include <stdint.h>
-
-/* =========================
-   Minimal STM32F103 register map
-   (enough for RCC, GPIOB, AFIO, I2C1)
-   ========================= */
-
-#define PERIPH_BASE        0x40000000UL
-#define APB1PERIPH_BASE    (PERIPH_BASE + 0x00000000UL)
-#define APB2PERIPH_BASE    (PERIPH_BASE + 0x00010000UL)
-
-#define RCC_BASE           (APB2PERIPH_BASE + 0x00009000UL)
-#define AFIO_BASE          (APB2PERIPH_BASE + 0x00000000UL)
-#define GPIOB_BASE         (APB2PERIPH_BASE + 0x00000C00UL)
-#define I2C1_BASE          (APB1PERIPH_BASE + 0x00005400UL)
-
-typedef struct {
-  volatile uint32_t CR;
-  volatile uint32_t CFGR;
-  volatile uint32_t CIR;
-  volatile uint32_t APB2RSTR;
-  volatile uint32_t APB1RSTR;
-  volatile uint32_t AHBENR;
-  volatile uint32_t APB2ENR;
-  volatile uint32_t APB1ENR;
-  volatile uint32_t BDCR;
-  volatile uint32_t CSR;
-} RCC_TypeDef;
-
-typedef struct {
-  volatile uint32_t EVCR;
-  volatile uint32_t MAPR;
-  volatile uint32_t EXTICR[4];
-  volatile uint32_t MAPR2;
-} AFIO_TypeDef;
-
-typedef struct {
-  volatile uint32_t CRL;
-  volatile uint32_t CRH;
-  volatile uint32_t IDR;
-  volatile uint32_t ODR;
-  volatile uint32_t BSRR;
-  volatile uint32_t BRR;
-  volatile uint32_t LCKR;
-} GPIO_TypeDef;
-
-typedef struct {
-  volatile uint32_t CR1;
-  volatile uint32_t CR2;
-  volatile uint32_t OAR1;
-  volatile uint32_t OAR2;
-  volatile uint32_t DR;
-  volatile uint32_t SR1;
-  volatile uint32_t SR2;
-  volatile uint32_t CCR;
-  volatile uint32_t TRISE;
-} I2C_TypeDef;
-
-#define RCC   ((RCC_TypeDef*)RCC_BASE)
-#define AFIO  ((AFIO_TypeDef*)AFIO_BASE)
-#define GPIOB ((GPIO_TypeDef*)GPIOB_BASE)
-#define I2C1  ((I2C_TypeDef*)I2C1_BASE)
-
-/* =========================
-   Bit helpers / constants
-   ========================= */
-
-#define RCC_APB2ENR_AFIOEN   (1U << 0)
-#define RCC_APB2ENR_IOPBEN   (1U << 3)
-#define RCC_APB1ENR_I2C1EN   (1U << 21)
-
-#define RCC_APB1RSTR_I2C1RST (1U << 21)
-
-/* AFIO MAPR: I2C1_REMAP is bit 1 on STM32F1 */
-#define AFIO_MAPR_I2C1_REMAP (1U << 1)
-
-/* I2C CR1 bits */
-#define I2C_CR1_PE           (1U << 0)
-#define I2C_CR1_START        (1U << 8)
-#define I2C_CR1_STOP         (1U << 9)
-#define I2C_CR1_ACK          (1U << 10)
-#define I2C_CR1_SWRST        (1U << 15)
-
-/* I2C SR1 bits */
-#define I2C_SR1_SB           (1U << 0)
-#define I2C_SR1_ADDR         (1U << 1)
-#define I2C_SR1_BTF          (1U << 2)
-#define I2C_SR1_TXE          (1U << 7)
-#define I2C_SR1_AF           (1U << 10)
-
-/* I2C SR2 bits */
-#define I2C_SR2_BUSY         (1U << 1)
-
-/* =========================
-   Simple delay (blocking)
-   Assumes ~8MHz-ish core clock.
-   Adjust if needed.
-   ========================= */
-static void delay_ms(uint32_t ms) {
-  for (uint32_t i = 0; i < ms; i++) {
-    for (volatile uint32_t j = 0; j < 8000; j++) {
-      __asm volatile ("nop");
-    }
-  }
-}
-
-/* =========================
-   I2C low-level functions
-   ========================= */
-
-static int i2c1_start(void) {
-  /* Wait until bus not busy */
-  uint32_t timeout = 200000;
-  while ((I2C1->SR2 & I2C_SR2_BUSY) && timeout--) { }
-  if (!timeout) return -1;
-
-  I2C1->CR1 |= I2C_CR1_START;
-
-  timeout = 200000;
-  while (!(I2C1->SR1 & I2C_SR1_SB) && timeout--) { }
-  if (!timeout) return -2;
-
-  return 0;
-}
-
-static int i2c1_send_addr_write(uint8_t addr7) {
-  I2C1->DR = (uint32_t)(addr7 << 1); /* write = 0 */
-
-  uint32_t timeout = 200000;
-  while (!(I2C1->SR1 & I2C_SR1_ADDR) && timeout--) {
-    if (I2C1->SR1 & I2C_SR1_AF) { /* NACK */
-      I2C1->SR1 &= ~I2C_SR1_AF;
-      return -3;
-    }
-  }
-  if (!timeout) return -4;
-
-  /* Clear ADDR by reading SR1 then SR2 */
-  (void)I2C1->SR1;
-  (void)I2C1->SR2;
-
-  return 0;
-}
-
-static int i2c1_write_byte(uint8_t b) {
-  uint32_t timeout = 200000;
-  while (!(I2C1->SR1 & I2C_SR1_TXE) && timeout--) { }
-  if (!timeout) return -5;
-
-  I2C1->DR = b;
-
-  return 0;
-}
-
-static int i2c1_stop_after_btf(void) {
-  uint32_t timeout = 200000;
-  while (!(I2C1->SR1 & I2C_SR1_BTF) && timeout--) { }
-  if (!timeout) return -6;
-
-  I2C1->CR1 |= I2C_CR1_STOP;
-  return 0;
-}
-
-/* =========================
-   MCP4728 write: set all 4 channels
-   addr confirmed in your scan: 0x60
-   Data format: 1 cmd + 8 bytes (2 per channel)
-   ========================= */
-
-static int mcp4728_write_all(uint8_t addr7, uint16_t va, uint16_t vb, uint16_t vc, uint16_t vd) {
-  /* Clamp to 12-bit */
-  va &= 0x0FFF; vb &= 0x0FFF; vc &= 0x0FFF; vd &= 0x0FFF;
-
-  /* Packet:
-     [0] command
-     [1..8] two bytes per channel A,B,C,D: (D11..D4), (D3..D0 in upper nibble)
-  */
-  uint8_t buf[9];
-  buf[0] = 0xC0; /* Fast write all channels (common usage). */
-
-  uint16_t v[4] = {va, vb, vc, vd};
-  for (int ch = 0; ch < 4; ch++) {
-    buf[1 + 2*ch] = (uint8_t)(v[ch] >> 4);
-    buf[2 + 2*ch] = (uint8_t)((v[ch] & 0x0F) << 4);
-  }
-
-  int rc = i2c1_start();
-  if (rc) { I2C1->CR1 |= I2C_CR1_STOP; return rc; }
-
-  rc = i2c1_send_addr_write(addr7);
-  if (rc) { I2C1->CR1 |= I2C_CR1_STOP; return rc; }
-
-  for (int i = 0; i < 9; i++) {
-    rc = i2c1_write_byte(buf[i]);
-    if (rc) { I2C1->CR1 |= I2C_CR1_STOP; return rc; }
-  }
-
-  rc = i2c1_stop_after_btf();
-  return rc;
-}
-
-/* =========================
-   Init: clocks + GPIOB + I2C1 (PB8/PB9 remap)
-   This assumes APB1 (PCLK1) = 8 MHz.
-   If your clock is different, update I2C timings below.
-   ========================= */
-
-static void i2c1_init_pb8_pb9_100khz_pclk1_8mhz(void) {
-  /* Enable clocks: AFIO + GPIOB + I2C1 */
-  RCC->APB2ENR |= (RCC_APB2ENR_AFIOEN | RCC_APB2ENR_IOPBEN);
-  RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;
-
-  /* Remap I2C1 to PB8/PB9 */
-  AFIO->MAPR |= AFIO_MAPR_I2C1_REMAP;
-
-  /* Configure PB8 (SCL), PB9 (SDA) as Alternate Function Open-Drain, 50 MHz
-     For F1: CNF=11 (AF OD), MODE=11 (50MHz) => 0b1111 per pin
-     PB8 is CRH bits [3:0], PB9 is CRH bits [7:4]
-  */
-  GPIOB->CRH &= ~((0xFU << 0) | (0xFU << 4));
-  GPIOB->CRH |=  ((0xFU << 0) | (0xFU << 4));
-
-  /* Reset I2C1 */
-  RCC->APB1RSTR |= RCC_APB1RSTR_I2C1RST;
-  RCC->APB1RSTR &= ~RCC_APB1RSTR_I2C1RST;
-
-  /* Disable before configuring */
-  I2C1->CR1 &= ~I2C_CR1_PE;
-
-  /* CR2 = PCLK1 frequency in MHz (assumed 8 MHz) */
-  I2C1->CR2 = 8;
-
-  /* Own address: bit14 must be kept at 1 in OAR1 */
-  I2C1->OAR1 = (1U << 14);
-
-  /* Standard mode 100 kHz:
-     CCR = PCLK1 / (2*Fscl) = 8MHz / (2*100k) = 40
-  */
-  I2C1->CCR = 40;
-
-  /* TRISE = PCLK1_MHz + 1 = 8 + 1 = 9 */
-  I2C1->TRISE = 9;
-
-  /* Enable peripheral */
-  I2C1->CR1 |= I2C_CR1_PE;
-}
-
-/* =========================
-   main
-   ========================= */
-
-int main(void) {
-  /* NOTE:
-     This example does NOT reconfigure the system clock.
-     It assumes PCLK1 is 8 MHz (common after reset if you haven't boosted clocks).
-     If your project runs PCLK1 at 36 MHz (typical 72MHz system), update:
-       CR2 = 36
-       CCR = 180   (36MHz / (2*100k))
-       TRISE = 37
-  */
-
-  i2c1_init_pb8_pb9_100khz_pclk1_8mhz();
-
-  const uint8_t MCP4728_ADDR = 0x60; /* you measured 'a=96' -> 0x60 */
-
-  while (1) {
-    /* Set 1: all different */
-    (void)mcp4728_write_all(MCP4728_ADDR, 1024, 2048, 3072, 4095);
-    delay_ms(1000);
-
-    /* Set 2: swapped */
-    (void)mcp4728_write_all(MCP4728_ADDR, 4095, 3072, 2048, 1024);
-    delay_ms(1000);
-  }
-}
-#endif
 
 #if (MAIN == BANG_LOOP)
 

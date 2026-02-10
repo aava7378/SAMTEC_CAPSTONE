@@ -17,6 +17,8 @@
 #define AD8495_OFFSET_mV  1250
 
 void     tc_init(void);
+int32_t  tc_read_c_x10_ch(uint8_t adc1_channel);
+
 int32_t  tc_read_c_x10(void);
 
 
